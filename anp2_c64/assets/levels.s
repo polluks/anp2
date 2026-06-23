@@ -14,6 +14,7 @@
 .export level_1_header, level_2_header
 .export level_table_lo, level_table_hi
 .export spectrum_to_c64_tile
+.export level_1_enemies, level_1_items
 
 .segment "RODATA"
 

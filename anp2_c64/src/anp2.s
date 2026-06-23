@@ -19,22 +19,26 @@
 ; Import symbols from asset files
 .import player_sprite, enemy_xeno, enemy_guard, bullet_sprite
 .import tile_graphics, tile_color_table
-.import music_title, music_level1, sfx_shoot, sfx_explosion, sfx_hurt, sfx_pickup, sfx_jump
+.import music_title_0, music_title_1, music_title_2
+.import music_level_0, music_level_1, music_level_2
+.import sfx_shoot, sfx_explosion, sfx_hurt, sfx_pickup, sfx_jump
 .import start_music, play_music, play_sfx
 .import level_1_header, level_2_header, level_table_lo, level_table_hi
+.import level_1_enemies, level_1_items
 .import spectrum_to_c64_tile
 .import title_bitmap_data, title_screen_data, title_color_data
 
 .export _frame_counter, _game_state, _player_x, _player_y
 .export _player_dir, _player_frame, _player_health, _player_weapon
-.export _player_grenades, _player_ammo
+.export _player_grenades, _player_ammo, _player_score
 .export _scroll_x, _scroll_y
 .export _keyboard_state, _joystick_state
 .export _tmp1, _tmp2, _tmp3, _tmp_ptr
 .export enemy_type, enemy_x, enemy_y, enemy_hp, enemy_state, enemy_timer
 .export bullet_x, bullet_y, bullet_vx, bullet_vy, bullet_type, bullet_active
 .export particle_x, particle_y, particle_vx, particle_vy, particle_life, particle_active
-.export map_width, map_height, map_data_ptr, music_ptr, music_tick, sfx_queue
+.export map_width, map_height, map_data_ptr, music_ptr0, music_ptr1, music_ptr2
+.export music_tick0, music_tick1, music_tick2, sfx_queue
 .export init_vic, init_sid, read_inputs, show_title, title_tick
 .export start_game, game_tick, handle_input, update_player, player_shoot
 .export update_enemies, update_bullets, update_particles, check_collisions
@@ -54,10 +58,13 @@ _player_health:   .res 1    ; player HP
 _player_weapon:   .res 1    ; current weapon
 _player_grenades: .res 1    ; grenade count
 _player_ammo:     .res 1    ; ammo
+_player_score:    .res 2    ; score
 _scroll_x:        .res 2    ; level scroll X
 _scroll_y:        .res 1    ; vertical scroll
 _keyboard_state:  .res 2    ; keyboard matrix state
 _joystick_state:  .res 1    ; joystick direction + fire
+_on_ground:       .res 1    ; 1 = player on solid ground
+_invincible_timer:.res 1    ; invincibility countdown after hit
 _tmp1:            .res 1    ; temporary storage
 _tmp2:            .res 1
 _tmp3:            .res 1
@@ -101,6 +108,9 @@ irq_handler:
     bne     @skip_game_tick
     jsr     game_tick
 @skip_game_tick:
+
+    ; Play music every frame
+    jsr     play_music
 
     ; Check for raster split
     lda     VIC + $19       ; VIC interrupt flag
@@ -301,6 +311,8 @@ show_title:
     jsr     clear_screen
     jsr     draw_title_gfx
     jsr     load_palette
+    lda     #0
+    jsr     start_music
     rts
 
 title_tick:
@@ -315,7 +327,6 @@ title_tick:
 @start_game:
     lda     #1
     sta     _game_state     ; loading state
-    jsr     start_game
     rts
 
 ;
@@ -344,9 +355,14 @@ start_game:
     sta     _player_grenades
     lda     #100
     sta     _player_ammo
+    lda     #0
+    sta     _player_score
+    sta     _player_score + 1
 
     ; Load level 1
     jsr     load_level
+    lda     #1
+    jsr     start_music
 
     ; Initialize coarse scroll tracker for render_frame
     lda     _scroll_x
@@ -371,6 +387,13 @@ game_tick:
     jsr     check_collisions
     jsr     update_camera
     jsr     render_frame
+
+    ; Check for player death
+    lda     _player_health
+    bne     @alive
+    lda     #4
+    sta     _game_state     ; game over
+@alive:
     rts
 
 ;
@@ -423,6 +446,16 @@ handle_input:
 ; Player update
 ;
 update_player:
+    ; Decrement invincibility timer
+    lda     _invincible_timer
+    beq     @skip_inv_dec
+    dec     _invincible_timer
+@skip_inv_dec:
+
+    ; Clear ground flag (floor collision will re-set if on ground)
+    lda     #$00
+    sta     _on_ground
+
     ; Apply gravity
     lda     _player_y+1
     clc
@@ -432,10 +465,19 @@ update_player:
     adc     #$00
     sta     _player_y
 
-    ; Handle horizontal movement
+    ; Handle horizontal movement with wall collision
     lda     _tmp2
     and     #$04            ; left
     beq     @try_right
+    
+    ; Check left wall collision
+    lda     _player_x + 1
+    sec
+    sbc     #$02            ; proposed new position
+    sta     _tmp1
+    jsr     check_wall_left
+    bne     @h_movement_done ; blocked
+    
     lda     _player_x+1
     sec
     sbc     #$02            ; speed
@@ -450,6 +492,15 @@ update_player:
     lda     _tmp2
     and     #$08            ; right
     beq     @h_movement_done
+    
+    ; Check right wall collision
+    lda     _player_x + 1
+    clc
+    adc     #$02            ; proposed new position
+    sta     _tmp1
+    jsr     check_wall_right
+    bne     @h_movement_done ; blocked
+    
     lda     _player_x+1
     clc
     adc     #$02
@@ -476,26 +527,29 @@ update_player:
     lda     _tmp2
     and     #$01            ; up
     beq     @jump_done
-    lda     _player_y+1
-    cmp     #$00            ; only jump if on ground
-    bne     @jump_done
+    lda     _on_ground
+    beq     @jump_done
     lda     #$F0            ; jump velocity (-16)
     sta     _player_y+1
+    ldx     #4              ; jump SFX
+    jsr     play_sfx
 @jump_done:
 
     ; Handle fire
     lda     _tmp2
     and     #$10            ; fire
-    beq     @fire
-    rts
-@fire:
+    beq     @no_fire
     jsr     player_shoot
+@no_fire:
     rts
 
 ;
 ; Player shooting
 ;
 player_shoot:
+    lda     _player_ammo
+    beq     @no_ammo
+    dec     _player_ammo
     lda     _player_weapon
     beq     @pistol
     cmp     #1
@@ -505,12 +559,20 @@ player_shoot:
     rts
 @pistol:
     jsr     spawn_bullet_pistol
+    ldx     #0
+    jsr     play_sfx
     rts
 @rifle:
     jsr     spawn_bullet_rifle
+    ldx     #0
+    jsr     play_sfx
     rts
 @shotgun:
     jsr     spawn_bullet_shotgun
+    ldx     #0
+    jsr     play_sfx
+    rts
+@no_ammo:
     rts
 
 ;
@@ -724,7 +786,7 @@ draw_col:
     adc     #$E0
     sta     _tmp_ptr + 1
 
-    ldx     _tmp3
+    lda     _tmp3
     asl
     asl
     asl                     ; tile_graphics offset
@@ -742,96 +804,6 @@ draw_col:
     lda     _tmp2
     cmp     #25
     bne     @row_loop
-    rts
-    
-    ; Draw new column at position 0
-    lda     _scroll_x
-    lsr
-    lsr
-    lsr
-    sta     _tmp1           ; tile_map_x
-    
-    lda     #0
-    sta     _tmp2           ; row
-@row_loop_sl:
-    lda     _tmp2
-    ldx     map_width
-    stx     _tmp_ptr
-    jsr     mul_a_by_tmp1
-    clc
-    adc     _tmp1
-    tay
-    lda     tile_map,y
-    tax
-    
-    ; screen_ram offset = row * 40
-    lda     _tmp2
-    asl
-    asl
-    asl
-    sta     _tmp_ptr
-    lda     _tmp2
-    asl
-    asl
-    asl
-    asl
-    asl
-    clc
-    adc     _tmp_ptr
-    tay
-    
-    lda     tile_color_table,x
-    sta     $C000,y
-    
-    ; bitmap_addr = $E000 + row * 320
-    ; row*320 = (row << 8) + (row << 6)
-    lda     _tmp2
-    sta     _tmp_ptr
-    lda     _tmp2
-    asl
-    asl
-    asl
-    asl
-    asl
-    asl                     ; row * 64
-    sta     _tmp3
-    lda     _tmp2
-    lsr
-    lsr                     ; high byte of row*64
-    sta     _tmp_ptr + 1
-    
-    lda     _tmp2
-    sta     _tmp_ptr + 1
-    lda     #0
-    
-    clc
-    lda     _tmp_ptr + 1
-    adc     _tmp3
-    sta     _tmp_ptr
-    lda     _tmp2
-    adc     _tmp_ptr + 1
-    clc
-    adc     #$E0
-    sta     _tmp_ptr + 1
-    
-    txa
-    asl
-    asl
-    asl
-    tax
-    ldy     #0
-@copy_bmp_sl:
-    lda     tile_graphics,x
-    sta     (_tmp_ptr),y
-    inx
-    iny
-    cpy     #8
-    bne     @copy_bmp_sl
-    
-    inc     _tmp2
-    lda     _tmp2
-    cmp     #25
-    bne     @row_loop_sl
     rts
 
 update_sprites:
@@ -930,11 +902,52 @@ sprite_msb_clear:
 load_level:
     ; Load level map data
     ; Converted from Spectrum tile format to C64 character format
-    ; Level data includes: tiles, enemy spawns, item locations
 
     ldx     #0
     jsr     load_map_tiles
     jsr     setup_sprites
+    jsr     spawn_enemies
+    rts
+
+spawn_enemies:
+    ; Spawn enemies from level data
+    ldx     #0              ; enemy index in level data (byte offset)
+    ldy     #0              ; enemy slot
+@loop:
+    cpy     #MAX_ENEMIES
+    beq     @done
+    ; Read type
+    lda     level_1_enemies,x
+    cmp     #$FF            ; end marker?
+    beq     @done
+    sta     enemy_type,y
+    inx
+    ; Read x_lo
+    lda     level_1_enemies,x
+    sta     enemy_x,y
+    inx
+    ; Read x_hi
+    lda     level_1_enemies,x
+    sta     enemy_x + 1,y
+    inx
+    ; Read y
+    lda     level_1_enemies,x
+    sta     enemy_y,y
+    lda     #$00
+    sta     enemy_y + 1,y
+    inx
+    ; Read state
+    lda     level_1_enemies,x
+    sta     enemy_state,y
+    inx
+    ; Set default HP
+    lda     #3
+    sta     enemy_hp,y
+    lda     #0
+    sta     enemy_timer,y
+    iny
+    jmp     @loop
+@done:
     rts
 
 load_map_tiles:
@@ -1012,13 +1025,13 @@ render_full_map:
     tax                     ; X = tile_map_x
     
     ; tile_map index = row * map_width + tile_map_x
+    stx     _tmp4           ; save tile_map_x BEFORE mul (mul clobbers X)
     lda     _tmp2           ; row
     ldy     map_width
     sty     _tmp_ptr
     jsr     mul_a_by_tmp1   ; A = row * map_width
-    stx     _tmp_ptr        ; temporarily save tile_map_x
     clc
-    adc     _tmp_ptr
+    adc     _tmp4           ; + saved tile_map_x
     tay
     lda     tile_map,y      ; tile type
     tax                     ; X = tile type
@@ -1276,7 +1289,9 @@ update_enemies:
     lda     enemy_timer,x
     and     #$3F
     bne     @skip
-    ; TODO: spawn enemy bullet
+    stx     _tmp4           ; save enemy index
+    jsr     spawn_enemy_bullet
+    ldx     _tmp4
     
 @skip:
     inx
@@ -1420,6 +1435,50 @@ spawn_bullet_shotgun:
     inx
     jmp     @find_b2
 @done_sg:
+    rts
+
+spawn_enemy_bullet:
+    ; Spawn bullet at enemy position (_tmp4 = enemy index)
+    ; Shoot toward player direction
+    ldx     #0
+@find:
+    cpx     #MAX_BULLETS
+    beq     @done
+    lda     bullet_active,x
+    beq     @found
+    inx
+    jmp     @find
+@found:
+    lda     #1
+    sta     bullet_active,x
+    lda     #2
+    sta     bullet_type,x   ; type 2 = enemy bullet
+
+    ldy     _tmp4
+    ; Position at enemy
+    lda     enemy_x,y
+    sta     bullet_x,x
+    lda     enemy_x + 1,y
+    sta     bullet_x + 1,x
+    lda     enemy_y,y
+    sta     bullet_y,x
+    lda     enemy_y + 1,y
+    sta     bullet_y + 1,x
+
+    ; Velocity toward player on X
+    lda     _player_x + 1
+    cmp     enemy_x + 1,y
+    bcc     @shoot_left
+    lda     #$FD            ; +3 right
+    sta     bullet_vx,x
+    jmp     @set_vy
+@shoot_left:
+    lda     #$FD            ; -3 left
+    sta     bullet_vx,x
+@set_vy:
+    lda     #$00
+    sta     bullet_vy,x
+@done:
     rts
 
 update_bullets:
@@ -1578,6 +1637,66 @@ update_particles:
     rts
 
 ;
+; Wall collision helpers
+;
+check_wall_left:
+    ; Check tile at player's left edge
+    ; _tmp1 = proposed new x position (pixel)
+    ; Returns: Z=1 if clear, Z=0 if blocked
+    ; Tile col = (x + 0) >> 3
+    lda     _tmp1
+    lsr
+    lsr
+    lsr
+    sta     _tmp2           ; col
+    ; Tile row = (player_y+1 + 4) >> 3 (midpoint)
+    lda     _player_y + 1
+    clc
+    adc     #4
+    lsr
+    lsr
+    lsr
+    sta     _tmp1           ; row
+    ldx     map_width
+    stx     _tmp_ptr
+    jsr     mul_a_by_tmp1
+    clc
+    adc     _tmp2
+    tay
+    lda     tile_map,y
+    cmp     #0
+    rts
+
+check_wall_right:
+    ; Check tile at player's right edge
+    ; _tmp1 = proposed new x position (pixel)
+    ; Tile col = (x + 7) >> 3 (right edge of 8-pixel player)
+    lda     _tmp1
+    clc
+    adc     #7
+    lsr
+    lsr
+    lsr
+    sta     _tmp2           ; col
+    ; Tile row = (player_y+1 + 4) >> 3 (midpoint)
+    lda     _player_y + 1
+    clc
+    adc     #4
+    lsr
+    lsr
+    lsr
+    sta     _tmp1           ; row
+    ldx     map_width
+    stx     _tmp_ptr
+    jsr     mul_a_by_tmp1
+    clc
+    adc     _tmp2
+    tay
+    lda     tile_map,y
+    cmp     #0
+    rts
+
+;
 ; Collision detection
 ;
 check_collisions:
@@ -1592,7 +1711,9 @@ check_collisions:
 @check_one_bullet:
     
     lda     bullet_active,x
-    beq     @next_bullet
+    bne     @check_bullet
+    jmp     @next_bullet
+@check_bullet:
     
     ; Get bullet center
     lda     bullet_x,x
@@ -1649,14 +1770,26 @@ check_collisions:
     lda     #$FF
     sta     enemy_type,y
     
+    ; Add score
+    lda     _player_score
+    clc
+    adc     #10
+    sta     _player_score
+    lda     _player_score + 1
+    adc     #0
+    sta     _player_score + 1
+    
     ; Spawn death particles
     tya
     pha                     ; save enemy index
-    lda     #4              ; count
-    ldx     enemy_x,y       ; x position (low byte)
+    lda     enemy_x,y
+    tax                     ; X = x
     lda     enemy_y,y
-    tay                     ; y position (low byte) in Y
+    tay                     ; Y = y
+    lda     #4              ; A = count
     jsr     spawn_particles
+    ldx     #1              ; explosion SFX
+    jsr     play_sfx
     pla
     tay                     ; restore enemy index
     
@@ -1668,6 +1801,8 @@ check_collisions:
     ldx     _tmp1
     ldy     _tmp2
     jsr     spawn_particles
+    ldx     #2              ; hurt SFX
+    jsr     play_sfx
     
     jmp     @next_bullet
     
@@ -1720,8 +1855,14 @@ check_collisions:
     cmp     #$14
     bcs     @pe_next
     
-    ; Player hit by enemy
+    ; Player hit by enemy (skip if invincible)
+    lda     _invincible_timer
+    bne     @pe_next
     dec     _player_health
+    lda     #$80
+    sta     _invincible_timer   ; ~2 seconds of invincibility
+    ldx     #2              ; hurt SFX
+    jsr     play_sfx
     lda     #$FF
     sta     enemy_timer,y   ; stun timer
     ; Push player back
@@ -1749,41 +1890,50 @@ check_collisions:
     jmp     @pe_loop
     
 @check_player_floor:
-    ; Simple floor collision: check tile below player
-    lda     _player_y
+    ; Check tile directly below player's feet
+    ; Player tile row = (player_y+1 + 7) >> 3 (bottom of 8-pixel player)
+    lda     _player_y + 1
+    clc
+    adc     #7
     lsr
     lsr
-    lsr                     ; player char row
+    lsr
+    sta     _tmp1           ; tile row below feet
+
+    ; Player tile col = (player_x+1 + 3) >> 3 (center of player)
+    lda     _player_x + 1
     clc
-    adc     #2              ; 2 rows below player
-    tax
-    
-    lda     _scroll_x
-    clc
-    adc     #20             ; center column
-    tay
-    
-    ; Get tile at map[row][col]
-    ; row * map_width + col
-    txa
+    adc     #3
+    lsr
+    lsr
+    lsr
+    sta     _tmp2           ; tile col
+
+    ; index = row * map_width + col
+    lda     _tmp1
     ldx     map_width
-    stx     _tmp1
-    jsr     mul_a_by_tmp1   ; A = row * map_width
+    stx     _tmp_ptr
+    jsr     mul_a_by_tmp1
     clc
-    adc     _scroll_x
-    adc     #20
+    adc     _tmp2
     tay
     lda     tile_map,y
-    cmp     #0              ; empty?
+    cmp     #0
     beq     @no_floor
-    
-    ; Floor below - prevent falling further
-    lda     #$00
+
+    ; Solid tile below - snap player and set ground flag
+    lda     _tmp1           ; tile row
+    asl
+    asl
+    asl                     ; *8 = top of tile
+    sec
+    sbc     #8              ; player feet align to tile top
     sta     _player_y + 1
-    lda     _player_y
-    and     #$F8            ; snap to char boundary
+    lda     #$00
     sta     _player_y
-    
+    lda     #1
+    sta     _on_ground
+
 @no_floor:
     rts
 
@@ -1791,32 +1941,28 @@ check_collisions:
 ; Loading screen state
 ;
 loading_tick:
-    ; Loading sequence: transition to playing state
-    ; Clear screen, show loading message, init level
-    
-    ; Clear game area
+    ; Loading sequence: clear screen, show loading message, init game
     jsr     clear_screen
-    
-    ; Draw loading text centered on screen
+
+    ; Draw loading text centered on row 12
     ldx     #0
 @draw_loading:
     lda     loading_msg,x
     beq     @done_loading
-    sta     $C000 + 20 * 40 + 12, x
+    sta     $C000 + 12 * 40 + 14, x
     inx
     jmp     @draw_loading
 @done_loading:
-    
-    ; Load level (already done in start_game, this is just visual)
-    ; Transition to playing state after a brief pause
-    lda     #60
+
+    ; Brief pause to show the loading message
+    lda     #30
     sta     _tmp1
 @wait_loop:
     dec     _tmp1
     bne     @wait_loop
-    
-    lda     #2
-    sta     _game_state
+
+    ; Initialize game
+    jsr     start_game
     rts
 
 loading_msg:
@@ -2112,7 +2258,11 @@ map_height:     .res 1
 map_data_ptr:   .res 2
 tile_map:       .res 1280    ; max 80x16 level tiles
 
-; Sound engine state
-music_ptr:      .res 2
-music_tick:     .res 1
+; Sound engine state (3 voices)
+music_ptr0:     .res 2
+music_ptr1:     .res 2
+music_ptr2:     .res 2
+music_tick0:    .res 1
+music_tick1:    .res 1
+music_tick2:    .res 1
 sfx_queue:      .res 4
