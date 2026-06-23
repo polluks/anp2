@@ -79,6 +79,7 @@ note_table_hi:
 ; Import from main module (BSS)
 .importzp _tmp_ptr
 .import music_ptr0, music_ptr1, music_ptr2
+.import music_start0, music_start1, music_start2
 .import music_tick0, music_tick1, music_tick2
 .import sfx_queue
 
@@ -174,7 +175,13 @@ play_v1:
     lda     _tmp_ptr+1
     sta     music_ptr0+1
 @stop:
-    rts
+    lda     music_start0
+    sta     music_ptr0
+    lda     music_start0+1
+    sta     music_ptr0+1
+    lda     #1
+    sta     music_tick0
+    jmp     play_v1
 
 ;
 ; Voice 2 player (SID $D407, music ch1)
@@ -236,7 +243,13 @@ play_v2:
     lda     _tmp_ptr+1
     sta     music_ptr1+1
 @stop:
-    rts
+    lda     music_start1
+    sta     music_ptr1
+    lda     music_start1+1
+    sta     music_ptr1+1
+    lda     #1
+    sta     music_tick1
+    jmp     play_v2
 
 ;
 ; Voice 3 player (SID $D40E, music ch2)
@@ -298,7 +311,13 @@ play_v3:
     lda     _tmp_ptr+1
     sta     music_ptr2+1
 @stop:
-    rts
+    lda     music_start2
+    sta     music_ptr2
+    lda     music_start2+1
+    sta     music_ptr2+1
+    lda     #1
+    sta     music_tick2
+    jmp     play_v3
 
 ;
 ; Start playing a music track
@@ -341,6 +360,20 @@ start_music:
     sta     music_ptr2+1
 
 @init_ticks:
+    ; Save start addresses for looping
+    lda     music_ptr0
+    sta     music_start0
+    lda     music_ptr0+1
+    sta     music_start0+1
+    lda     music_ptr1
+    sta     music_start1
+    lda     music_ptr1+1
+    sta     music_start1+1
+    lda     music_ptr2
+    sta     music_start2
+    lda     music_ptr2+1
+    sta     music_start2+1
+
     lda     #1
     sta     music_tick0
     sta     music_tick1

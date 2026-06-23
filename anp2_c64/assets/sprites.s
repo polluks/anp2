@@ -12,6 +12,7 @@
 
 .export player_sprite, enemy_xeno, enemy_guard, bullet_sprite
 .export tile_graphics, tile_color_table
+.export hud_glyphs
 
 .segment "RODATA"
 
@@ -212,10 +213,14 @@ tile_graphics:
     ; Tile 12: wall top
     .byte $FF,$81,$81,$BD,$81,$81,$81,$FF
 
-    ; Tile 13-15: reserved
-    .byte $00,$00,$00,$00,$00,$00,$00,$00
-    .byte $00,$00,$00,$00,$00,$00,$00,$00
-    .byte $00,$00,$00,$00,$00,$00,$00,$00
+    ; Tile 13: weapon upgrade
+    .byte $00,$7E,$42,$7A,$42,$7E,$00,$00
+    ; Tile 14: health pack
+    .byte $00,$18,$7E,$FF,$7E,$18,$00,$00
+    ; Tile 15: ammo
+    .byte $00,$3C,$7E,$66,$7E,$3C,$00,$00
+    ; Tile 16: keycard
+    .byte $00,$66,$7E,$5A,$7E,$66,$00,$00
 
     ; Tile 16-31: wall variations
     .res 16*8, $00
@@ -239,7 +244,10 @@ tile_color_table:
     .byte $06    ; 10: door    (blue on black)
     .byte $0E    ; 11: term    (light blue on black)
     .byte $01    ; 12: wall top (white on black)
-    .byte $00, $00, $00  ; 13-15: reserved
+    .byte $05    ; 13: weapon (green on black)
+    .byte $02    ; 14: health (red on black)
+    .byte $07    ; 15: ammo (yellow on black)
+    .byte $06    ; 16: keycard (blue on black)
 
 ; ---- Sprite color tables ----
 player_sprite_colors:
@@ -255,3 +263,39 @@ bullet_sprite_colors:
 player_sprite_frames:
     .word player_sprite, player_sprite+64
     .word player_sprite+128, player_sprite+192
+
+; HUD font glyphs (8x8 bitmap patterns)
+; Each character is 8 bytes, one per scanline
+; Index 0='0', 1='1', ... 9='9', 10='A', 11='C', 12='E', 13='H'
+; Index 14='I', 15='M', 16='N', 17='O', 18='P', 19='R', 20='S'
+; Index 21='T', 22='W', 23=':', 24=' ', 25='L', 26='F', 27='U', 28='G'
+hud_glyphs:
+    .byte $3C,$66,$6E,$76,$66,$66,$3C,$00  ; 0
+    .byte $18,$38,$18,$18,$18,$18,$3C,$00  ; 1
+    .byte $3C,$66,$06,$0C,$30,$60,$7E,$00  ; 2
+    .byte $3C,$66,$06,$0C,$06,$66,$3C,$00  ; 3
+    .byte $0C,$1C,$3C,$6C,$7E,$0C,$0C,$00  ; 4
+    .byte $7E,$60,$7C,$06,$06,$66,$3C,$00  ; 5
+    .byte $3C,$66,$60,$7C,$66,$66,$3C,$00  ; 6
+    .byte $7E,$06,$0C,$18,$30,$30,$30,$00  ; 7
+    .byte $3C,$66,$66,$3C,$66,$66,$3C,$00  ; 8
+    .byte $3C,$66,$66,$3E,$06,$66,$3C,$00  ; 9
+    .byte $18,$3C,$66,$66,$7E,$66,$66,$00  ; A
+    .byte $3C,$66,$60,$60,$60,$66,$3C,$00  ; C
+    .byte $7E,$60,$60,$7C,$60,$60,$7E,$00  ; E
+    .byte $66,$66,$66,$7E,$66,$66,$66,$00  ; H
+    .byte $3C,$18,$18,$18,$18,$18,$3C,$00  ; I
+    .byte $66,$6E,$7E,$7E,$76,$66,$66,$00  ; M
+    .byte $42,$62,$72,$5A,$4E,$46,$42,$00  ; N
+    .byte $3C,$66,$66,$66,$66,$66,$3C,$00  ; O
+    .byte $7C,$66,$66,$7C,$60,$60,$60,$00  ; P
+    .byte $7C,$66,$66,$7C,$6C,$66,$66,$00  ; R
+    .byte $3C,$66,$60,$3C,$06,$66,$3C,$00  ; S
+    .byte $7E,$18,$18,$18,$18,$18,$18,$00  ; T
+    .byte $66,$66,$66,$66,$66,$66,$3C,$00  ; W
+    .byte $00,$00,$18,$00,$00,$18,$00,$00  ; :
+    .byte $00,$00,$00,$00,$00,$00,$00,$00  ; space
+    .byte $60,$60,$60,$60,$60,$60,$7E,$00  ; L
+    .byte $7E,$60,$60,$7C,$60,$60,$60,$00  ; F
+    .byte $66,$66,$66,$66,$66,$66,$3C,$00  ; U
+    .byte $3C,$66,$66,$6C,$66,$66,$3C,$00  ; G

@@ -98,10 +98,10 @@ level_1_enemies:
 ; Level 1 items
 ; Format: .byte type, x_lo, x_hi, y
 level_1_items:
-    .byte 0, $30, $00, $A0    ; weapon upgrade
-    .byte 1, $70, $00, $A0    ; health pack
-    .byte 2, $B0, $00, $A0    ; ammo
-    .byte 3, $E0, $00, $A0    ; keycard
+    .byte 0, $30, $00, $60    ; weapon upgrade (row 12, ground)
+    .byte 1, $70, $00, $60    ; health pack   (row 12, ground)
+    .byte 2, $B0, $00, $60    ; ammo          (row 12, ground)
+    .byte 3, $E0, $00, $10    ; keycard       (row 2, platform)
 
 ; ---- Level 2: Laboratory ----
 level_2_header:

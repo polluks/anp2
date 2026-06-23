@@ -163,20 +163,21 @@ assets/music_level.s # Level music (3 channels, converted from PT3)
 
 ## Current Status (Jun 2026)
 - **3-voice music playback**: working (title + level music converted from PT3, 3-channel GT player)
+- **Music looping**: Music wraps to start when end marker ($00) reached on all 3 channels
 - **SFX**: queue-based on voice 3, 5 effects (shoot, explosion, hurt, pickup, jump)
-- **Build**: `make` produces `anp2.prg` (25637 bytes)
+- **HUD**: Text-mode status bar at top of screen — HP, ammo, score (5-digit) rendered via bitmap font
+- **Wall collision**: Horizontal + ceiling collision with tile map
+- **Item pickup**: 4 item types (weapon upgrade, health, ammo, keycard) placed on tile map, collision checked each frame, pickup SFX
+- **Enemy AI**: Patrol mode (direction toggle every ~60 frames, move 1px/frame) when player >96px away; chase mode (2px/frame toward player, shoot every ~60 frames) when closer
+- **Build**: `make` produces `anp2.prg` (26629 bytes)
 
 ## Known Issues & Missing Features
-- **Wall collision**: Basic horizontal wall collision added (check_wall_left/check_wall_right), vertical wall collision not implemented
-- **HUD**: No status bar rendering (HP, ammo, weapon, score) — pending
-- **Score**: `_player_score` variable tracks score (+10 per enemy kill), no HUD display
 - **Vertical scrolling**: `_scroll_y` never updated from player position
-- **Item pickup**: `level_1_items` data exists but collision detection not implemented
-- **Music looping**: Music tracks stop when end marker reached (no loop logic yet)
 - **Pause**: State 3 handler not implemented
-- **Game over**: State 4 (game_over_tick) implemented, checked in game_tick when health <= 0
 - **Multiple levels**: Level progression not implemented
 - **Grenades**: `_player_grenades` variable exists but no throw logic
+- **Physics**: Jump velocity uses unsigned 16-bit addition causing sprite Y to wrap through off-screen values; ceiling collision helps mitigate
+- **Enemy gravity**: Enemies pushed by gravity but no floor collision — they fall through the map
 
 ## Actions Not Allowed
 - Do NOT create new .md or README files unless explicitly asked

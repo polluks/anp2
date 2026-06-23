@@ -19,6 +19,7 @@
 ; Import symbols from asset files
 .import player_sprite, enemy_xeno, enemy_guard, bullet_sprite
 .import tile_graphics, tile_color_table
+.import hud_glyphs
 .import music_title_0, music_title_1, music_title_2
 .import music_level_0, music_level_1, music_level_2
 .import sfx_shoot, sfx_explosion, sfx_hurt, sfx_pickup, sfx_jump
@@ -37,7 +38,9 @@
 .export enemy_type, enemy_x, enemy_y, enemy_hp, enemy_state, enemy_timer
 .export bullet_x, bullet_y, bullet_vx, bullet_vy, bullet_type, bullet_active
 .export particle_x, particle_y, particle_vx, particle_vy, particle_life, particle_active
-.export map_width, map_height, map_data_ptr, music_ptr0, music_ptr1, music_ptr2
+.export map_width, map_height, map_data_ptr
+.export music_ptr0, music_ptr1, music_ptr2
+.export music_start0, music_start1, music_start2
 .export music_tick0, music_tick1, music_tick2, sfx_queue
 .export init_vic, init_sid, read_inputs, show_title, title_tick
 .export start_game, game_tick, handle_input, update_player, player_shoot
@@ -385,6 +388,7 @@ game_tick:
     jsr     update_bullets
     jsr     update_particles
     jsr     check_collisions
+    jsr     update_items
     jsr     update_camera
     jsr     render_frame
 
@@ -464,6 +468,41 @@ update_player:
     lda     _player_y
     adc     #$00
     sta     _player_y
+
+    ; Ceiling collision check (player head hitting solid tile above)
+    lda     _player_y + 1
+    lsr
+    lsr
+    lsr
+    sta     _tmp1           ; tile row at top of player
+    lda     _player_x + 1
+    clc
+    adc     #4              ; center of player
+    lsr
+    lsr
+    lsr
+    sta     _tmp2           ; tile col
+    lda     _tmp1
+    ldx     map_width
+    stx     _tmp_ptr
+    jsr     mul_a_by_tmp1
+    clc
+    adc     _tmp2
+    tay
+    lda     tile_map,y
+    cmp     #0
+    beq     @no_ceiling
+    ; Hit head - snap down, zero subpixel
+    lda     _tmp1
+    asl
+    asl
+    asl
+    clc
+    adc     #8
+    sta     _player_y + 1
+    lda     #$00
+    sta     _player_y
+@no_ceiling:
 
     ; Handle horizontal movement with wall collision
     lda     _tmp2
@@ -598,11 +637,257 @@ update_camera:
     rts
 
 ;
+; Draw HUD character at screen position
+; A=glyph_index, X=col, Y=row
+;
+draw_hud_char:
+    ; Save inputs
+    sta     _tmp4           ; glyph index
+    stx     _tmp_ptr        ; col
+    sty     _tmp2           ; row
+
+    ; Screen address = $C000 + row*40 + col
+    ; row*40 = row*32 + row*8
+    tya
+    asl
+    asl
+    asl                     ; *8
+    sta     _tmp3
+    tya
+    asl
+    asl
+    asl
+    asl
+    asl                     ; *32
+    clc
+    adc     _tmp3           ; *40
+    clc
+    adc     _tmp_ptr        ; + col
+    tay
+
+    ; Write color byte (white on black)
+    lda     #$01
+    sta     $C000,y
+
+    ; Bitmap address = $E000 + (row*40+col)*8
+    tya
+    asl
+    rol     _tmp3           ; need temp storage
+    asl
+    rol     _tmp3
+    asl
+    rol     _tmp3
+    sta     _tmp_ptr
+    lda     _tmp3
+    and     #$07
+    clc
+    adc     #$E0
+    sta     _tmp_ptr+1
+    lda     _tmp_ptr
+    sta     _tmp_ptr
+    ; _tmp_ptr now points to bitmap location
+
+    ; Copy glyph data (8 bytes)
+    lda     _tmp4
+    asl
+    asl
+    asl                     ; *8 for glyph offset
+    tax
+    ldy     #0
+@copy:
+    lda     hud_glyphs,x
+    sta     (_tmp_ptr),y
+    inx
+    iny
+    cpy     #8
+    bne     @copy
+    rts
+
+;
+; Draw 2-digit number at (col, row)
+; X=col, Y=row, A=value
+;
+draw_hud_byte:
+    sta     _tmp3           ; value
+    stx     _tmp2           ; col
+    sty     _tmp4           ; row
+
+    ; Tens digit
+    ldx     #0
+@tens:
+    lda     _tmp3
+    cmp     #10
+    bcc     @tens_done
+    sbc     #10
+    sta     _tmp3
+    inx
+    jmp     @tens
+@tens_done:
+    txa                     ; tens digit
+    clc
+    adc     #1              ; digit 0 = glyph index 1
+    ldx     _tmp2
+    ldy     _tmp4
+    jsr     draw_hud_char
+    ; Ones digit
+    lda     _tmp3
+    clc
+    adc     #1              ; digit 0 = glyph index 1
+    ldx     _tmp2
+    inx
+    ldy     _tmp4
+    jsr     draw_hud_char
+    rts
+
+;
+; Divide 16-bit value by 10
+; Input:  _tmp3 = lo, _tmp4 = hi
+; Output: A = remainder (0-9), _tmp3 = quotient_lo, _tmp4 = quotient_hi
+;
+div16_by_10:
+    lda     #0
+    sta     _tmp_ptr
+    sta     _tmp_ptr+1
+    ldx     #16
+@loop:
+    asl     _tmp3
+    rol     _tmp4
+    rol
+    cmp     #10
+    bcc     @skip
+    sbc     #10
+    sec
+    jmp     @shift
+@skip:
+    clc
+@shift:
+    rol     _tmp_ptr
+    rol     _tmp_ptr+1
+    dex
+    bne     @loop
+    lda     _tmp_ptr
+    sta     _tmp3
+    lda     _tmp_ptr+1
+    sta     _tmp4
+    rts
+
+;
+; Draw 5-digit number at (col, row)
+; X=col, Y=row, value = _player_score (2 bytes)
+;
+draw_hud_word:
+    stx     _tmp1           ; start col
+    sty     _tmp2           ; row
+
+    ; Copy score to working vars
+    lda     _player_score
+    sta     _tmp3
+    lda     _player_score+1
+    sta     _tmp4
+
+    ; Extract 5 digits into stack (LSD first)
+    ldy     #0
+@digit_loop:
+    jsr     div16_by_10
+    pha                     ; push remainder (digit)
+    iny
+    cpy     #5
+    bne     @digit_loop
+
+    ; Pop and draw digits MSD first (col offset 0..4)
+    lda     #0
+    sta     _tmp3           ; offset
+@draw_loop:
+    pla
+    clc
+    adc     #1              ; glyph index = digit + 1
+    pha
+    lda     _tmp3
+    clc
+    adc     _tmp1           ; col = start_col + offset
+    tax
+    pla
+    ldy     _tmp2
+    jsr     draw_hud_char
+    inc     _tmp3
+    lda     _tmp3
+    cmp     #5
+    bne     @draw_loop
+    rts
+
+;
+; Render HUD (status bar at top of screen)
+;
+draw_hud:
+    ; Row 0: "HP:XX  AM:XX  SC:XXXXX"
+    ; Col 0='H', 1='P', 2=':', 3-4=HP, 7='A', 8='M', 9=':', 10-11=AM,
+    ; 14='S', 15='C', 16=':', 17-21=SCORE
+    ldx     #0
+    ldy     #0
+
+    ; HP label
+    lda     #13             ; 'H'
+    ldx     #0
+    ldy     #0
+    jsr     draw_hud_char
+    lda     #18             ; 'P'
+    ldx     #1
+    ldy     #0
+    jsr     draw_hud_char
+    lda     #23             ; ':'
+    ldx     #2
+    ldy     #0
+    jsr     draw_hud_char
+    lda     _player_health
+    ldx     #3
+    ldy     #0
+    jsr     draw_hud_byte
+
+    ; AM label
+    lda     #10             ; 'A'
+    ldx     #7
+    ldy     #0
+    jsr     draw_hud_char
+    lda     #15             ; 'M'
+    ldx     #8
+    ldy     #0
+    jsr     draw_hud_char
+    lda     #23             ; ':'
+    ldx     #9
+    ldy     #0
+    jsr     draw_hud_char
+    lda     _player_ammo
+    ldx     #10
+    ldy     #0
+    jsr     draw_hud_byte
+
+    ; SC label
+    lda     #20             ; 'S'
+    ldx     #14
+    ldy     #0
+    jsr     draw_hud_char
+    lda     #11             ; 'C'
+    ldx     #15
+    ldy     #0
+    jsr     draw_hud_char
+    lda     #23             ; ':'
+    ldx     #16
+    ldy     #0
+    jsr     draw_hud_char
+    ldx     #17
+    ldy     #0
+    jsr     draw_hud_word
+
+    rts
+
+;
 ; Render current frame
 ;
 SCR_COL_39 = $C000 + 39  ; base for column 39 of each row
 
 render_frame:
+    jsr     draw_hud
+
     lda     _scroll_x
     and     #$07
     sta     VIC + $16       ; fine scroll
@@ -907,6 +1192,153 @@ load_level:
     jsr     load_map_tiles
     jsr     setup_sprites
     jsr     spawn_enemies
+    jsr     place_items
+    rts
+
+place_items:
+    ; Place item tiles from level item data onto the tile map
+    ldx     #0              ; byte offset into level_1_items
+@loop:
+    ; Read type
+    lda     level_1_items,x
+    cmp     #$FF            ; end marker?
+    beq     @done
+    sta     _tmp4           ; item type (0-3)
+    inx
+    ; Read x_lo
+    lda     level_1_items,x
+    sta     _tmp1           ; x_lo
+    inx
+    ; Read x_hi
+    lda     level_1_items,x
+    sta     _tmp2           ; x_hi (not used for tile col)
+    inx
+    ; Read y
+    lda     level_1_items,x
+    sta     _tmp3           ; y
+    inx
+
+    ; Convert pixel coords to tile coords
+    lda     _tmp1
+    lsr
+    lsr
+    lsr                     ; tile col = x >> 3
+    sta     _tmp1
+    lda     _tmp3
+    lsr
+    lsr
+    lsr                     ; tile row = y >> 3
+    sta     _tmp2
+
+    ; Bounds check
+    cmp     map_height      ; row < map_height?
+    bcs     @next
+    lda     _tmp1
+    cmp     map_width       ; col < map_width?
+    bcs     @next
+
+    ; tile_map index = row * map_width + col
+    lda     _tmp2
+    ldx     map_width
+    stx     _tmp_ptr
+    jsr     mul_a_by_tmp1
+    clc
+    adc     _tmp1
+    tay
+
+    ; Write item tile: 13 + type
+    lda     _tmp4
+    clc
+    adc     #13
+    sta     tile_map,y
+
+@next:
+    jmp     @loop
+@done:
+    rts
+
+update_items:
+    ; Check if player overlaps an item tile
+    ; Player center tile coords
+    lda     _player_x + 1
+    clc
+    adc     #4
+    lsr
+    lsr
+    lsr
+    sta     _tmp1           ; tile col
+
+    lda     _player_y + 1
+    clc
+    adc     #4
+    lsr
+    lsr
+    lsr
+    sta     _tmp2           ; tile row
+
+    ; tile index = row * map_width + col
+    lda     _tmp2
+    ldx     map_width
+    stx     _tmp_ptr
+    jsr     mul_a_by_tmp1
+    clc
+    adc     _tmp1
+    tay
+
+    lda     tile_map,y
+    cmp     #13             ; item tile range 13-16
+    bcc     @no_item
+    cmp     #17
+    bcs     @no_item
+
+    ; Item type = tile - 13
+    sec
+    sbc     #13
+    tax                     ; X = item type
+
+    ; Apply item effect
+    cpx     #0
+    beq     @weapon
+    cpx     #1
+    beq     @health
+    cpx     #2
+    beq     @ammo
+    ; type 3 = keycard
+    jmp     @no_item        ; keycard: placeholder
+
+@weapon:
+    ; Upgrade weapon (pistol->rifle, rifle->shotgun)
+    lda     _player_weapon
+    cmp     #2
+    bcs     @no_item
+    inc     _player_weapon
+    jmp     @pickup
+
+@health:
+    lda     _player_health
+    cmp     #5
+    bcs     @no_item        ; max HP check
+    inc     _player_health
+    jmp     @pickup
+
+@ammo:
+    lda     _player_ammo
+    clc
+    adc     #10
+    bcc     @set_ammo
+    lda     #$FF            ; clamp to 255
+@set_ammo:
+    sta     _player_ammo
+    jmp     @pickup
+
+@pickup:
+    ; Remove item tile, play SFX
+    lda     #0
+    sta     tile_map,y
+    ldx     #3              ; pickup SFX
+    jsr     play_sfx
+
+@no_item:
     rts
 
 spawn_enemies:
@@ -1232,11 +1664,13 @@ update_enemies:
     ldx     #0
 @next:
     cpx     #MAX_ENEMIES
-    beq     @done
+    bne     *+5
+    jmp     @done
     
     lda     enemy_type,x
     cmp     #$FF            ; inactive?
-    beq     @skip
+    bne     *+5
+    jmp     @skip
     
     ; Enemy gravity
     lda     enemy_y + 1,x
@@ -1247,26 +1681,39 @@ update_enemies:
     adc     #$00
     sta     enemy_y,x
     
-    ; Simple AI: move toward player
+    ; Check if active (bit 0 set, ignoring patrol dir in bit 7)
     lda     enemy_state,x
-    cmp     #1              ; active?
-    bne     @skip
+    and     #$01
+    cmp     #1
+    beq     *+5
+    jmp     @skip
     
-    ; Check timer for direction change
+    ; Decrement AI timer
     dec     enemy_timer,x
-    bpl     @move
-    ; Reset timer and maybe change direction
+    bpl     @ai_move
+    ; Timer expired: reset and toggle patrol direction
     lda     #60
     sta     enemy_timer,x
+    ; Toggle patrol direction (bit 7 of enemy_state)
+    lda     enemy_state,x
+    eor     #$80
+    sta     enemy_state,x
     
-@move:
-    ; Move toward player on X axis
+@ai_move:
+    ; Calculate X distance to player
     lda     _player_x
-    cmp     enemy_x,x
-    bcc     @move_left
-    bne     @move_right
-    jmp     @check_shoot
-@move_left:
+    sec
+    sbc     enemy_x,x
+    bcs     @dist_pos
+    eor     #$FF
+    adc     #$01
+@dist_pos:
+    cmp     #$60            ; within 96 pixels?
+    bcc     @chase
+    ; Far: patrol (bit 7 of enemy_state = direction, 0=left, 1=right)
+    lda     enemy_state,x
+    bmi     @patrol_r
+@patrol_l:
     lda     enemy_x + 1,x
     sec
     sbc     #$01
@@ -1274,8 +1721,8 @@ update_enemies:
     lda     enemy_x,x
     sbc     #$00
     sta     enemy_x,x
-    jmp     @check_shoot
-@move_right:
+    jmp     @ai_done
+@patrol_r:
     lda     enemy_x + 1,x
     clc
     adc     #$01
@@ -1283,16 +1730,42 @@ update_enemies:
     lda     enemy_x,x
     adc     #$00
     sta     enemy_x,x
+    jmp     @ai_done
+
+@chase:
+    ; Close: move toward player
+    lda     _player_x
+    cmp     enemy_x,x
+    bcc     @chase_left
+    bne     @chase_right
+    jmp     @check_shoot
+@chase_left:
+    lda     enemy_x + 1,x
+    sec
+    sbc     #$02            ; faster when chasing
+    sta     enemy_x + 1,x
+    lda     enemy_x,x
+    sbc     #$00
+    sta     enemy_x,x
+    jmp     @check_shoot
+@chase_right:
+    lda     enemy_x + 1,x
+    clc
+    adc     #$02
+    sta     enemy_x + 1,x
+    lda     enemy_x,x
+    adc     #$00
+    sta     enemy_x,x
     
 @check_shoot:
-    ; Check if enemy should shoot (randomish based on timer)
+    ; Shoot when timer reaches 0 (every ~60 frames)
     lda     enemy_timer,x
-    and     #$3F
-    bne     @skip
-    stx     _tmp4           ; save enemy index
+    bne     @ai_done
+    stx     _tmp4
     jsr     spawn_enemy_bullet
     ldx     _tmp4
     
+@ai_done:
 @skip:
     inx
     jmp     @next
@@ -2262,6 +2735,9 @@ tile_map:       .res 1280    ; max 80x16 level tiles
 music_ptr0:     .res 2
 music_ptr1:     .res 2
 music_ptr2:     .res 2
+music_start0:   .res 2
+music_start1:   .res 2
+music_start2:   .res 2
 music_tick0:    .res 1
 music_tick1:    .res 1
 music_tick2:    .res 1
