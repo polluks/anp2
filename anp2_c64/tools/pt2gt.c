@@ -378,12 +378,27 @@ static int count_pattern_entries(const uint8_t *data, int size, int pat_off)
 {
     if (pat_off < 0 || pat_off + 2 > size) return 0;
 
-    int first = data[pat_off] | (data[pat_off + 1] << 8);
-    int n = (first - pat_off) / 2;
+    /* The table holds one 16-bit offset per pattern and is followed
+       immediately by pattern data, so the lowest offset it contains is the
+       address of the first pattern stored: pat_off + 2*numpat.
+       Entry 0 is NOT that pattern -- a module may order its table so the
+       first pattern lives anywhere. Offsets may also repeat or step
+       backwards when patterns are shared or reordered, so scan for the
+       candidate n whose minimum entry matches the implied data start. */
+    for (int cand = 1; cand <= MAX_PATTERNS; cand++) {
+        if (pat_off + cand * 2 > size) break;
 
-    if (first <= pat_off || first >= size) return 0;
-    if (n < 1 || n > MAX_PATTERNS) return 0;
-    return n;
+        int lo = 0xFFFF;
+        for (int p = 0; p < cand; p++) {
+            int addr = data[pat_off + p * 2] | (data[pat_off + p * 2 + 1] << 8);
+            if (addr < lo) lo = addr;
+        }
+
+        if (lo == pat_off + 2 * cand)
+            return cand;
+    }
+
+    return 0;
 }
 
 /* Find pattern table in module data */
@@ -422,15 +437,16 @@ static int find_pattern_table(const uint8_t *data, int size, int mod_start,
         if (n < 1)
             continue;
         
-        /* One 16-bit pointer per entry, table must be strictly increasing */
+        /* One 16-bit pointer per pattern. Offsets may repeat or step
+           backwards when patterns are shared or reordered, so require only
+           that every entry lands past the table and inside the module. */
+        int first_data = pat_off + n * 2;
         int valid = 0;
-        int prev = -1;
         for (int p = 0; p < n; p++) {
             int addr = data[pat_off + p*2] | (data[pat_off + p*2 + 1] << 8);
             int file_off = addr - base;
-            if (file_off >= 0 && file_off < size && addr > prev)
+            if (file_off >= first_data && file_off < size)
                 valid++;
-            prev = addr;
         }
         
         if (valid == n && n > best_valid) {
