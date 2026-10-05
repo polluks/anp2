@@ -16,8 +16,13 @@ assets/screen.s     # Title/loading screen graphics placeholders
 assets/sprites.s    # Player, enemy, bullet sprite data (hires, no multicolor)
 assets/sound.s      # 3-voice SID music player + SFX engine (~350 lines)
 assets/levels.s     # Level map data + enemy/item spawns
-assets/music_title.s # Title music (3 channels, converted from PT3)
-assets/music_level.s # Level music (3 channels, converted from PT3)
+assets/music_title.s # Title music (3 channels) — BROKEN, see Known Issues
+assets/music_level.s # Level music (3 channels) — GENERATED, do not hand-edit
+tools/pt2gt.c        # PT3 pattern data -> 6502 note stream converter
+source_music/Makefile     # PT3 extraction + conversion pipeline
+source_music/decompress_game.py # Exomizer bank decompression
+source_music/mksong.py    # Assembles assets/music_level.s from channel streams
+source_music/music_ingame_ch{0,1,2}.s # Per-channel pt2gt output
 ```
 
 ## Build Commands
@@ -25,6 +30,11 @@ assets/music_level.s # Level music (3 channels, converted from PT3)
 - `make clean` — remove build artifacts
 - `ca65 -t c64 -g -I src -o build/foo.o foo.s` — assemble single file
 - `ld65 -C anp2.cfg -o anp2.prg build/*.o` — link manually
+- `make -C source_music` — regenerate `assets/music_level.s` from the PT3 module
+- `make -C source_music clean` — drop decompressed banks, modules, and the pt2gt binary
+
+`assets/music_level.s` is generated. Editing it by hand will be overwritten; change
+`tools/pt2gt.c` or the Makefile instead and re-run `make -C source_music`.
 
 ## Memory Map (linker config)
 | Address   | Use                      |
@@ -130,9 +140,32 @@ assets/music_level.s # Level music (3 channels, converted from PT3)
 - **3 independent channel streams**: PT3 tick patterns converted via pt2gt → 3 separate data streams
 - **SFX**: queue-based (`sfx_queue`: state, tick, ptr_lo, ptr_hi), overrides voice 3 when active; first note played immediately, subsequent notes frame-stepped until $00 end marker
 - **Music data files**: `assets/music_title.s` (`music_title_0/1/2`), `assets/music_level.s` (`music_level_0/1/2`)
-- **Title music**: speed=31, patterns=32 (source: bank_1.bin @0x98D)
-- **Level music**: speed=6, patterns=14 (source: bank_3.bin @0x2E4)
-- **PT3 extraction process**: Exomizer 2 decompression of game blocks 4-6 → Z80 emulator for bank-switched streams → pt2gt note conversion
+- **Level music**: speed=6, 27 patterns, 13-position order list. Source: `bank_3.bin` offset 0x0000, 15301 bytes
+- **Title music**: broken — see Known Issues. There is no title PT3 module in the game
+- **PT3 extraction process**: `source_music/decompress_game.py` decompresses the Spectrum blocks with Exomizer 2 and writes `banks/bank_*.bin`; the loader's 10 decompression sites are enumerated there, including two loader-internal buffers at `$629C` and `$65F0`. `tools/pt2gt` then walks the packed pattern table of `banks/modules/ingame.pt3` once per channel
+
+### PT3 Module Layout (Neoplasma 2)
+The only genuine module in this build is `bank_3.bin` @ `0x0000`, whose header names it
+"ingame ... by n1k-o". Key offsets — do not assume these are standard:
+
+| Offset | Meaning |
+|--------|---------|
+| `$64`  | speed = 6 |
+| `$65`  | **not** the pattern count (previously misread as `numpat-1`) |
+| `$67`  | pattern table offset = `$00D7` |
+| `$C9`  | pattern order list, 13 entries, `$FF`-terminated |
+| `$D6`  | `$FF` order terminator |
+| `$D7`  | pattern pointer table, one 16-bit offset per pattern, stride **2** |
+| `$10D` | pattern 0 data — table size is `($10D-$D7)/2` = 27 patterns |
+
+Pattern pointers address channel 0 only. Each pattern holds 3 channel streams packed
+back to back, each `$00`-terminated, so `parse_channel_data` reports the stream end and the
+caller steps over the preceding channels. Order list: `0 3 6 9 12 15 18 21 12 15 18 9 24`.
+The module ends at `0x3BC5`; the rest of the 16383-byte bank is padding.
+
+Converted result: 624 / 769 / 562 notes for channels 0 / 1 / 2, no unhandled opcodes.
+A structural scan (`order list + $FF + pointer table`) over all 92 decompressed files finds
+no second module.
 
 ## Game Logic Details
 
@@ -162,22 +195,26 @@ assets/music_level.s # Level music (3 channels, converted from PT3)
 - `draw_col(Y, _tmp1)`: Y = screen column (0 or 39), `_tmp1` = tile map column
 
 ## Current Status (Jun 2026)
-- **3-voice music playback**: working (title + level music converted from PT3, 3-channel GT player)
+- **3-voice music playback**: working for level music (3-channel player, data generated from `bank_3.bin` @0). Title music is broken — see Known Issues
 - **Music looping**: Music wraps to start when end marker ($00) reached on all 3 channels
 - **SFX**: queue-based on voice 3, 5 effects (shoot, explosion, hurt, pickup, jump)
 - **HUD**: Text-mode status bar at top of screen — HP, ammo, score (5-digit) rendered via bitmap font
 - **Wall collision**: Horizontal + ceiling collision with tile map
 - **Item pickup**: 4 item types (weapon upgrade, health, ammo, keycard) placed on tile map, collision checked each frame, pickup SFX
 - **Enemy AI**: Patrol mode (direction toggle every ~60 frames, move 1px/frame) when player >96px away; chase mode (2px/frame toward player, shoot every ~60 frames) when closer
-- **Build**: `make` produces `anp2.prg` (26629 bytes)
+- **Build**: `make` produces `anp2.prg` (31957 bytes)
 
 ## Known Issues & Missing Features
-- **Vertical scrolling**: `_scroll_y` never updated from player position
+- **Title music is broken**: `assets/music_title.s` is a conversion of `bank_1.bin` @ `0x98D`, which is not a PT3 module — it is Spectrum attribute/shape data for the title logo (`$4C`/`$4E` = bright white/yellow attributes, `$1F` padding). It references sample IDs 38-255 where PT3 only has 31, so it plays garbage. Fix by silencing it or finding a non-PT3 title tune; the original game appears to ship only the "ingame" module
+- **Vertical scrolling unverified at runtime**: implemented in `src/anp2.s` (16-bit tile indexing, vertical camera offset, row blits/redraws, one shifted row per rendered frame, `_scroll_x_prev` fix, Level 1 start row 12). Compiles and links cleanly but has not been confirmed in an emulator — see VICE note below
+- **VICE validation blocked**: `x64sc` autostart halts at BASIC `searching for anp2` / `loading` and reports `Main CPU: Error - cycle limit reached.`; remote-monitor never reaches `render_frame`. Emulator verification of both scrolling and the rebuilt music is still outstanding
 - **Pause**: State 3 handler not implemented
 - **Multiple levels**: Level progression not implemented
 - **Grenades**: `_player_grenades` variable exists but no throw logic
 - **Physics**: Jump velocity uses unsigned 16-bit addition causing sprite Y to wrap through off-screen values; ceiling collision helps mitigate
 - **Enemy gravity**: Enemies pushed by gravity but no floor collision — they fall through the map
+- **pt2gt warnings**: unused variables `sid_note_lo`, `sid_note_hi`, `has_note_or_rest`, `all_events`, `row_counts`, `total_notes`
+- **`find_pt3_modules()` is over-permissive**: it still writes many false-positive `bank_*_pt3_at_*.bin` files; it is unused by the build but makes the `banks/` directory noisy
 
 ## Actions Not Allowed
 - Do NOT create new .md or README files unless explicitly asked
