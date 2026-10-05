@@ -24,7 +24,10 @@
 .import music_level_0, music_level_1, music_level_2
 .import sfx_shoot, sfx_explosion, sfx_hurt, sfx_pickup, sfx_jump
 .import start_music, play_music, play_sfx
-.import level_1_header, level_2_header, level_table_lo, level_table_hi
+.import level_1_header, level_2_header
+.import level_start_x_lo, level_start_y_lo
+.import level_1_enemies, level_2_enemies
+.import level_1_items, level_2_items, level_table_lo, level_table_hi
 .import level_1_enemies, level_1_items
 .import spectrum_to_c64_tile
 .import title_bitmap_data, title_screen_data, title_color_data
@@ -34,7 +37,8 @@
 .export _player_grenades, _player_ammo, _player_score
 .export _scroll_x, _scroll_y
 .export _keyboard_state, _joystick_state
-.export _tmp1, _tmp2, _tmp3, _tmp_ptr
+.export _tmp1, _tmp2, _tmp3, _tmp_ptr, _tmp5, _tmp6, _tmp7
+.export _level_index, _item_ptr, _enemy_ptr
 .export enemy_type, enemy_x, enemy_y, enemy_hp, enemy_state, enemy_timer
 .export bullet_x, bullet_y, bullet_vx, bullet_vy, bullet_type, bullet_active
 .export particle_x, particle_y, particle_vx, particle_vy, particle_life, particle_active
@@ -46,7 +50,7 @@
 .export start_game, game_tick, handle_input, update_player, player_shoot
 .export update_enemies, update_bullets, update_particles, check_collisions
 .export update_camera, render_frame, load_level, setup_sprites, clear_screen
-.export draw_title_gfx
+.export draw_title_gfx, get_tile, mul_map_width
 
 .segment "ZEROPAGE"
 
@@ -72,7 +76,16 @@ _tmp1:            .res 1    ; temporary storage
 _tmp2:            .res 1
 _tmp3:            .res 1
 _tmp4:            .res 1
+_tmp5:            .res 1
+_tmp6:            .res 1
+_tmp7:            .res 1
 _tmp_ptr:         .res 2    ; temporary pointer
+_scroll_y_prev:   .res 1    ; last rendered vertical scroll row
+_scroll_x_prev:   .res 1    ; last rendered coarse horizontal scroll column
+_scroll_px:       .res 1    ; vertical scroll in pixels (row * 8)
+_level_index:     .res 1    ; current level (0 or 1)
+_item_ptr:        .res 2    ; level item data pointer
+_enemy_ptr:       .res 2    ; level enemy data pointer
 
 ; BASIC header and code start at $0801
 ; ld65 PRG output consumes first 2 bytes as load address
@@ -196,7 +209,9 @@ game_loop:
     jmp     @done
 
 @playing_tick:
-    ; Game logic handled in IRQ
+    ; Rendering runs here, outside the IRQ. Vertical scrolling shifts
+    ; 7.7KB of bitmap RAM, which overruns the 50Hz interrupt.
+    jsr     render_frame
     jmp     @done
 
 @game_over_tick:
@@ -340,14 +355,9 @@ start_game:
     lda     #$00
     sta     _scroll_x
     sta     _scroll_x+1
-    lda     #$60
-    sta     _player_x
-    lda     #$00
-    sta     _player_x+1
-    lda     #$80
-    sta     _player_y
-    lda     #$00
-    sta     _player_y+1
+    sta     _scroll_y
+    sta     _scroll_y_prev
+    sta     _scroll_px
     lda     #1
     sta     _player_dir
     lda     #3
@@ -362,17 +372,35 @@ start_game:
     sta     _player_score
     sta     _player_score + 1
 
-    ; Load level 1
+    ; Load the current level, then set the player start from its header
+    lda     _level_index
     jsr     load_level
+
+    ldx     _level_index
+    lda     level_start_x_lo,x
+    sta     _player_x + 1
+    lda     #$00
+    sta     _player_x
+    lda     level_start_y_lo,x
+    sta     _player_y + 1
+    lda     #$00
+    sta     _player_y
+
     lda     #1
     jsr     start_music
 
-    ; Initialize coarse scroll tracker for render_frame
+    ; Position the camera, then draw the map for the resulting scroll offset
+    jsr     update_camera
+    jsr     render_full_map
+
+    ; Initialize scroll trackers for render_frame
     lda     _scroll_x
     lsr
     lsr
     lsr
-    sta     _tmp3
+    sta     _scroll_x_prev
+    lda     _scroll_y
+    sta     _scroll_y_prev
 
     lda     #2
     sta     _game_state     ; playing
@@ -390,7 +418,6 @@ game_tick:
     jsr     check_collisions
     jsr     update_items
     jsr     update_camera
-    jsr     render_frame
 
     ; Check for player death
     lda     _player_health
@@ -474,26 +501,19 @@ update_player:
     lsr
     lsr
     lsr
-    sta     _tmp1           ; tile row at top of player
+    sta     _tmp4           ; tile row at top of player
     lda     _player_x + 1
     clc
     adc     #4              ; center of player
     lsr
     lsr
     lsr
-    sta     _tmp2           ; tile col
-    lda     _tmp1
-    ldx     map_width
-    stx     _tmp_ptr
-    jsr     mul_a_by_tmp1
-    clc
-    adc     _tmp2
-    tay
-    lda     tile_map,y
+    sta     _tmp5           ; tile col
+    jsr     get_tile
     cmp     #0
     beq     @no_ceiling
     ; Hit head - snap down, zero subpixel
-    lda     _tmp1
+    lda     _tmp4
     asl
     asl
     asl
@@ -630,10 +650,35 @@ update_camera:
     ; Clamp scroll
     lda     _scroll_x
     cmp     #$80
-    bcc     @scroll_done
+    bcc     @h_scroll_done
     lda     #$80
     sta     _scroll_x
-@scroll_done:
+@h_scroll_done:
+
+    ; Vertical scroll: level must be taller than the screen to scroll
+    lda     map_height
+    cmp     #25
+    bcc     @v_scroll_zero  ; map shorter than screen -> no vertical scroll
+    sec
+    sbc     #25
+    sta     _tmp4           ; last scrollable row
+
+    ; Player row = _player_y + 1 (8-bit high byte of world Y), >> 3
+    lda     _player_y + 1
+    lsr
+    lsr
+    lsr
+    sec
+    sbc     #11             ; keep player ~11 rows down the screen
+    bcc     @v_scroll_zero
+    cmp     _tmp4
+    bcc     @v_scroll_store
+    lda     _tmp4           ; clamp to bottom
+    jmp     @v_scroll_store
+@v_scroll_zero:
+    lda     #0
+@v_scroll_store:
+    sta     _scroll_y
     rts
 
 ;
@@ -886,8 +931,6 @@ draw_hud:
 SCR_COL_39 = $C000 + 39  ; base for column 39 of each row
 
 render_frame:
-    jsr     draw_hud
-
     lda     _scroll_x
     and     #$07
     sta     VIC + $16       ; fine scroll
@@ -897,19 +940,43 @@ render_frame:
     lsr
     lsr
     lsr
-    cmp     _tmp3
+    cmp     _scroll_x_prev
     beq     @no_scroll
     bcc     @scrolled_left
-    sta     _tmp3
+    sta     _scroll_x_prev
     ; Scrolled right: shift screen, draw new right column
     jsr     scroll_right
     jmp     @no_scroll
 @scrolled_left:
-    sta     _tmp3
+    sta     _scroll_x_prev
     jsr     scroll_left
     
 @no_scroll:
+    ; Check coarse vertical scroll change
+    lda     _scroll_y
+    cmp     _scroll_y_prev
+    beq     @no_vscroll
+    ; Apply a single row of scrolling per frame. A tile row blit is
+    ; ~8600 cycles, so catching up several rows in one frame would
+    ; overrun the frame and drop further camera updates.
+    bcc     @vscroll_up
+    ; Camera moved down one row: content moves up, expose bottom row
+    jsr     screen_shift_up
+    ldy     #24
+    jsr     draw_row
+    inc     _scroll_y_prev
+    jmp     @no_vscroll
+
+@vscroll_up:
+    ; Camera moved up one row: content moves down, expose top row
+    jsr     screen_shift_down
+    ldy     #0
+    jsr     draw_row
+    dec     _scroll_y_prev
+
+@no_vscroll:
     jsr     update_sprites
+    jsr     draw_hud
     rts
 
 screen_shift_left:
@@ -972,53 +1039,139 @@ screen_shift_right:
     bne     @chunk1
     rts
 
+;
+; Vertical scroll blits. One tile row = 40 screen bytes and 320 bitmap bytes.
+; The bitmap is walked a page at a time; vshift_src/vshift_dst double as the
+; operands of the indexed loads/stores so only the page-high byte changes.
+; Both directions copy all 25 rows, so the exposed row is redrawn by the
+; caller afterwards via draw_row.
+;
+screen_shift_up:
+    ; screen RAM: $C028..$C3E7 -> $C000..$C3BF (960 bytes)
+    ldx     #0
+@s1:
+    lda     $C028,x
+    sta     $C000,x
+    inx
+    bne     @s1
+    ldx     #0
+@s2:
+    lda     $C128,x
+    sta     $C100,x
+    inx
+    bne     @s2
+    ldx     #0
+@s3:
+    lda     $C228,x
+    sta     $C200,x
+    inx
+    bne     @s3
+    ldx     #0
+@s4:
+    lda     $C328,x
+    sta     $C300,x
+    inx
+    cpx     #192
+    bne     @s4
+
+    ; bitmap: $E140..$FF3F -> $E000..$F7FF (7680 bytes = 30 pages)
+    lda     #<$E140
+    sta     vshift_src
+    lda     #>$E140
+    sta     vshift_src + 1
+    lda     #<$E000
+    sta     vshift_dst
+    lda     #>$E000
+    sta     vshift_dst + 1
+    ldx     #30
+@up_page:
+    ldy     #0
+@up_byte:
+    lda     vshift_src,y
+    sta     vshift_dst,y
+    iny
+    bne     @up_byte
+    inc     vshift_src + 1
+    inc     vshift_dst + 1
+    dex
+    bne     @up_page
+    rts
+
+screen_shift_down:
+    ; screen RAM: $C000..$C3BF -> $C028..$C3E7 (copy backwards)
+    ldx     #191
+@d4:
+    lda     $C300,x
+    sta     $C328,x
+    dex
+    cpx     #$FF
+    bne     @d4
+    ldx     #255
+@d3:
+    lda     $C200,x
+    sta     $C228,x
+    dex
+    bne     @d3
+    ldx     #255
+@d2:
+    lda     $C100,x
+    sta     $C128,x
+    dex
+    bne     @d2
+    ldx     #255
+@d1:
+    lda     $C000,x
+    sta     $C028,x
+    dex
+    bne     @d1
+
+    ; bitmap: $E000..$F7FF -> $E140..$FF3F (7680 bytes = 30 pages)
+    lda     #<$F7FF
+    sta     vshift_src
+    lda     #>$F7FF
+    sta     vshift_src + 1
+    lda     #<$FF3F
+    sta     vshift_dst
+    lda     #>$FF3F
+    sta     vshift_dst + 1
+    ldx     #30
+@down_page:
+    ldy     #255
+@down_byte:
+    lda     vshift_src,y
+    sta     vshift_dst,y
+    dey
+    bne     @down_byte
+    dec     vshift_src + 1
+    dec     vshift_dst + 1
+    dex
+    bne     @down_page
+    rts
+
 scroll_right:
     jsr     screen_shift_left
-    lda     _scroll_x
-    lsr
-    lsr
-    lsr
-    clc
-    adc     #39
-    sta     _tmp1           ; tile map column (rightmost visible)
     ldy     #39
     jsr     draw_col
     rts
 
 scroll_left:
     jsr     screen_shift_right
-    lda     _scroll_x
-    lsr
-    lsr
-    lsr
-    sta     _tmp1           ; tile map column (leftmost visible)
     ldy     #0
     jsr     draw_col
     rts
 
-draw_col:
-    ; Y = screen column (0 or 39), _tmp1 = tile map column
-    sty     _tmp4
-    lda     #0
-    sta     _tmp2
-@row_loop:
-    lda     _tmp2
-    ldx     map_width
-    stx     _tmp_ptr
-    jsr     mul_a_by_tmp1
-    clc
-    adc     _tmp1
-    tay
-    lda     tile_map,y
-    sta     _tmp3           ; tile type
-
-    ; Screen address = $C000 + row*40 + col
-    ; row*40 = row*32 + row*8
+;
+; Draw one screen cell from the tile map
+;   _tmp2 = screen row (0-24), _tmp4 = screen col (0-39)
+; Map coords = (row + _scroll_y, col + scroll_x/8)
+;
+draw_cell:
+    ; screen cell index = row*40 + col
     lda     _tmp2
     asl
     asl
     asl                     ; *8
-    sta     _tmp_ptr
+    sta     _tmp7
     lda     _tmp2
     asl
     asl
@@ -1026,52 +1179,51 @@ draw_col:
     asl
     asl                     ; *32
     clc
-    adc     _tmp_ptr        ; + *8 = *40
-    clc
-    adc     _tmp4           ; + col
-    tay
+    adc     _tmp7
+    adc     _tmp4           ; *40 + col
+    sta     _tmp7
 
-    ldx     _tmp3
-    lda     tile_color_table,x
-    sta     $C000,y
-
-    ; Bitmap address = $E000 + (row*40+col)*8
-    ; cell_offset = row*40+col
-    lda     _tmp2
-    asl
-    asl
-    asl                     ; *8
-    sta     _tmp_ptr
-    lda     _tmp2
-    asl
-    asl
-    asl
-    asl
-    asl                     ; *32
-    clc
-    adc     _tmp_ptr        ; *40
+    ; map col = (scroll_x >> 3) + screen col
+    lda     _scroll_x
+    lsr
+    lsr
+    lsr
     clc
     adc     _tmp4
-    ; A = cell_offset (0-999)
+    sta     _tmp5
+    ; map row = screen row + _scroll_y
+    lda     _tmp2
+    clc
+    adc     _scroll_y
+    sta     _tmp4
+
+    jsr     get_tile
+    sta     _tmp6           ; tile id
+
+    ; screen RAM: $C000 + cell index
+    ldx     _tmp6
+    lda     tile_color_table,x
+    ldy     _tmp7
+    sta     $C000,y
+
+    ; bitmap: $E000 + cell index * 8
+    lda     _tmp7
+    asl
+    asl
+    asl                     ; *8
     sta     _tmp_ptr
     lda     #0
+    rol
     sta     _tmp_ptr + 1
-    ldx     #3
-@shift:
-    asl     _tmp_ptr
-    rol     _tmp_ptr + 1
-    dex
-    bne     @shift
-
-    lda     _tmp_ptr
     clc
-    adc     #$00
+    lda     _tmp_ptr
+    adc     #$E0
     sta     _tmp_ptr
     lda     _tmp_ptr + 1
-    adc     #$E0
+    adc     #0
     sta     _tmp_ptr + 1
 
-    lda     _tmp3
+    ldx     _tmp6
     asl
     asl
     asl                     ; tile_graphics offset
@@ -1084,14 +1236,48 @@ draw_col:
     iny
     cpy     #8
     bne     @copy
+    rts
 
+;
+; Draw one screen column of tiles (used by horizontal scrolling)
+;   Y = screen column
+;
+draw_col:
+    sty     _tmp4
+    lda     #0
+    sta     _tmp2
+@row_loop:
+    jsr     draw_cell
     inc     _tmp2
     lda     _tmp2
     cmp     #25
     bne     @row_loop
     rts
 
+;
+; Draw one screen row of tiles (used by vertical scrolling)
+;   Y = screen row
+;
+draw_row:
+    sty     _tmp2
+    lda     #0
+    sta     _tmp4
+@col_loop:
+    jsr     draw_cell
+    inc     _tmp4
+    lda     _tmp4
+    cmp     #40
+    bne     @col_loop
+    rts
+
 update_sprites:
+    ; Vertical scroll in pixels = _scroll_y * 8
+    lda     _scroll_y
+    asl
+    asl
+    asl
+    sta     _scroll_px
+
     ; Update sprite 0 (player) position
     lda     _player_x + 1
     sta     VIC + $00
@@ -1106,6 +1292,8 @@ update_sprites:
     sta     VIC + $10
 @player_y:
     lda     _player_y + 1
+    sec
+    sbc     _scroll_px
     sta     VIC + $01
     
     ; Player sprite pointer always $10 (at $C400)
@@ -1144,6 +1332,8 @@ update_sprites:
     sta     VIC + $10
 @enemy_y:
     lda     enemy_y + 1,x
+    sec
+    sbc     _scroll_px
     sta     VIC + $01,y
     
     ; Set sprite pointer at $C3F9-$C3FB
@@ -1187,36 +1377,75 @@ sprite_msb_clear:
 load_level:
     ; Load level map data
     ; Converted from Spectrum tile format to C64 character format
+    ; A = level index (0 or 1)
 
-    ldx     #0
+    sta     _level_index
+    tax
+    lda     level_table_lo,x
+    sta     map_data_ptr
+    lda     level_table_hi,x
+    sta     map_data_ptr + 1
+
     jsr     load_map_tiles
     jsr     setup_sprites
     jsr     spawn_enemies
     jsr     place_items
     rts
 
+level_enemy_ptr:
+    lda     _level_index
+    beq     @l1
+    lda     #<level_2_enemies
+    sta     _enemy_ptr
+    lda     #>level_2_enemies
+    sta     _enemy_ptr + 1
+    rts
+@l1:
+    lda     #<level_1_enemies
+    sta     _enemy_ptr
+    lda     #>level_1_enemies
+    sta     _enemy_ptr + 1
+    rts
+
+level_item_ptr:
+    lda     _level_index
+    beq     @l1
+    lda     #<level_2_items
+    sta     _item_ptr
+    lda     #>level_2_items
+    sta     _item_ptr + 1
+    rts
+@l1:
+    lda     #<level_1_items
+    sta     _item_ptr
+    lda     #>level_1_items
+    sta     _item_ptr + 1
+    rts
+
 place_items:
     ; Place item tiles from level item data onto the tile map
-    ldx     #0              ; byte offset into level_1_items
+    jsr     level_item_ptr
+    ldy     #0              ; byte offset into item data
+    ldx     #0              ; scratch
 @loop:
     ; Read type
-    lda     level_1_items,x
+    lda     (_item_ptr),y
     cmp     #$FF            ; end marker?
     beq     @done
     sta     _tmp4           ; item type (0-3)
-    inx
+    iny
     ; Read x_lo
-    lda     level_1_items,x
+    lda     (_item_ptr),y
     sta     _tmp1           ; x_lo
-    inx
+    iny
     ; Read x_hi
-    lda     level_1_items,x
+    lda     (_item_ptr),y
     sta     _tmp2           ; x_hi (not used for tile col)
-    inx
+    iny
     ; Read y
-    lda     level_1_items,x
+    lda     (_item_ptr),y
     sta     _tmp3           ; y
-    inx
+    iny
 
     ; Convert pixel coords to tile coords
     lda     _tmp1
@@ -1231,26 +1460,30 @@ place_items:
     sta     _tmp2
 
     ; Bounds check
-    cmp     map_height      ; row < map_height?
+    lda     _tmp2           ; row < map_height?
+    cmp     map_height
     bcs     @next
-    lda     _tmp1
-    cmp     map_width       ; col < map_width?
+    lda     _tmp1           ; col < map_width?
+    cmp     map_width
     bcs     @next
 
     ; tile_map index = row * map_width + col
     lda     _tmp2
-    ldx     map_width
-    stx     _tmp_ptr
-    jsr     mul_a_by_tmp1
+    jsr     mul_map_width
     clc
+    lda     _tmp_ptr
     adc     _tmp1
-    tay
+    sta     _tmp_ptr
+    lda     _tmp_ptr + 1
+    adc     #0
+    sta     _tmp_ptr + 1
 
     ; Write item tile: 13 + type
+    ldy     #0
     lda     _tmp4
     clc
     adc     #13
-    sta     tile_map,y
+    sta     (_tmp_ptr),y
 
 @next:
     jmp     @loop
@@ -1266,7 +1499,7 @@ update_items:
     lsr
     lsr
     lsr
-    sta     _tmp1           ; tile col
+    sta     _tmp5           ; tile col
 
     lda     _player_y + 1
     clc
@@ -1274,18 +1507,22 @@ update_items:
     lsr
     lsr
     lsr
-    sta     _tmp2           ; tile row
+    sta     _tmp4           ; tile row
 
-    ; tile index = row * map_width + col
-    lda     _tmp2
-    ldx     map_width
-    stx     _tmp_ptr
-    jsr     mul_a_by_tmp1
+    ; Recompute the tile address so the pickup can clear it
+    lda     _tmp4
+    jsr     mul_map_width
     clc
-    adc     _tmp1
-    tay
+    lda     _tmp_ptr
+    adc     _tmp5
+    sta     _tmp_ptr
+    lda     _tmp_ptr + 1
+    adc     #0
+    sta     _tmp_ptr + 1
+    ldy     #0
+    lda     (_tmp_ptr),y
+    sta     _tmp6           ; tile type
 
-    lda     tile_map,y
     cmp     #13             ; item tile range 13-16
     bcc     @no_item
     cmp     #17
@@ -1333,8 +1570,9 @@ update_items:
 
 @pickup:
     ; Remove item tile, play SFX
+    ldy     #0
     lda     #0
-    sta     tile_map,y
+    sta     (_tmp_ptr),y
     ldx     #3              ; pickup SFX
     jsr     play_sfx
 
@@ -1343,66 +1581,98 @@ update_items:
 
 spawn_enemies:
     ; Spawn enemies from level data
-    ldx     #0              ; enemy index in level data (byte offset)
-    ldy     #0              ; enemy slot
+    jsr     level_enemy_ptr
+    ldy     #0              ; byte offset into enemy data
+    ldx     #0              ; enemy slot
 @loop:
-    cpy     #MAX_ENEMIES
+    cpx     #MAX_ENEMIES
     beq     @done
     ; Read type
-    lda     level_1_enemies,x
+    lda     (_enemy_ptr),y
     cmp     #$FF            ; end marker?
     beq     @done
-    sta     enemy_type,y
-    inx
+    sta     enemy_type,x
+    iny
     ; Read x_lo
-    lda     level_1_enemies,x
-    sta     enemy_x,y
-    inx
+    lda     (_enemy_ptr),y
+    sta     enemy_x,x
+    iny
     ; Read x_hi
-    lda     level_1_enemies,x
-    sta     enemy_x + 1,y
-    inx
+    lda     (_enemy_ptr),y
+    sta     enemy_x + 1,x
+    iny
     ; Read y
-    lda     level_1_enemies,x
-    sta     enemy_y,y
+    lda     (_enemy_ptr),y
+    sta     enemy_y,x
     lda     #$00
-    sta     enemy_y + 1,y
-    inx
+    sta     enemy_y + 1,x
+    iny
     ; Read state
-    lda     level_1_enemies,x
-    sta     enemy_state,y
-    inx
+    lda     (_enemy_ptr),y
+    sta     enemy_state,x
+    iny
     ; Set default HP
     lda     #3
-    sta     enemy_hp,y
+    sta     enemy_hp,x
     lda     #0
-    sta     enemy_timer,y
-    iny
+    sta     enemy_timer,x
+    inx
     jmp     @loop
 @done:
+    ; Mark unused slots as empty
+    lda     #$FF
+@clear:
+    sta     enemy_type,x
+    inx
+    cpx     #MAX_ENEMIES
+    bne     @clear
     rts
 
 load_map_tiles:
     ; RLE-decompress level tiles into tile_map buffer
-    lda     level_1_header
+    ; Dimensions come from the level header pointed to by map_data_ptr
+    lda     map_data_ptr
+    sta     _tmp_ptr
+    lda     map_data_ptr + 1
+    sta     _tmp_ptr + 1
+
+    ; Reject levels larger than the tile map buffer can hold
+    ldy     #0
+    lda     (_tmp_ptr),y
+    cmp     #MAP_MAX_WIDTH
+    bcc     @width_ok
+    lda     #MAP_MAX_WIDTH
+@width_ok:
     sta     map_width
-    lda     level_1_header + 1
+    iny
+    lda     (_tmp_ptr),y
+    cmp     #MAP_MAX_HEIGHT
+    bcc     @height_ok
+    lda     #MAP_MAX_HEIGHT
+@height_ok:
     sta     map_height
     
     ; Point to tile data (header = 10 bytes, then tile data)
-    lda     #<level_1_header
+    lda     map_data_ptr
     clc
     adc     #10
     sta     _tmp_ptr
-    lda     #>level_1_header
+    lda     map_data_ptr + 1
     adc     #0
     sta     _tmp_ptr + 1
     
     ; Decompress RLE into tile_map
+    ; Index is 16-bit: _tmp3 = low byte, _tmp4 = high byte
+    ; Buffer capacity: _tmp5 = low byte, _tmp6 = high byte
     ldy     #0
-    ldx     #0              ; tile_map write index
-    stx     _tmp3
-    
+    lda     #0
+    sta     _tmp3
+    sta     _tmp4
+    lda     #<(MAP_MAX_WIDTH * MAP_MAX_HEIGHT)
+    sta     _tmp5
+    lda     #>(MAP_MAX_WIDTH * MAP_MAX_HEIGHT)
+    sta     _tmp6
+
 @next_rle:
     lda     (_tmp_ptr),y
     cmp     #$FF            ; end marker?
@@ -1420,158 +1690,95 @@ load_map_tiles:
     inc     _tmp_ptr + 1
 @no_inc2:
     
-    ldx     _tmp3
 @fill_loop:
+    ldx     _tmp3
     lda     _tmp1
     sta     tile_map,x
-    inx
+    inc     _tmp3
+    bne     @no_page
+    inc     _tmp4           ; low byte wrapped -> next page
+@no_page:
+    ; Stop once the write index reaches the buffer capacity
+    lda     _tmp3
+    cmp     _tmp5
+    bcc     @fill_more
+    lda     _tmp4
+    cmp     _tmp6
+    bcc     @fill_more
+    jmp     @done
+@fill_more:
     dec     _tmp2
     bne     @fill_loop
-    stx     _tmp3
     
     jmp     @next_rle
 @done:
-    ; Render the full initial visible area
-    jsr     render_full_map
     rts
 
 render_full_map:
     ; Render visible tiles to screen RAM and bitmap
     ; Two nested loops: row (0-24), col (0-39)
-    lda     _scroll_x
-    lsr
-    lsr
-    lsr
-    sta     _tmp3           ; scroll offset in chars
-    
-    lda     #00
+    lda     #0
     sta     _tmp2           ; row
 @row_loop:
-    lda     #00
-    sta     _tmp1           ; col
-@col_loop:
-    ; tile_map_x = col + scroll_offset
-    lda     _tmp1
-    clc
-    adc     _tmp3
-    tax                     ; X = tile_map_x
-    
-    ; tile_map index = row * map_width + tile_map_x
-    stx     _tmp4           ; save tile_map_x BEFORE mul (mul clobbers X)
-    lda     _tmp2           ; row
-    ldy     map_width
-    sty     _tmp_ptr
-    jsr     mul_a_by_tmp1   ; A = row * map_width
-    clc
-    adc     _tmp4           ; + saved tile_map_x
-    tay
-    lda     tile_map,y      ; tile type
-    tax                     ; X = tile type
-    
-    ; Screen byte
-    lda     tile_color_table,x
-    pha
-    
-    ; Screen RAM address: $C000 + row*40 + col
-    ; row*40 = (row << 5) + (row << 3)
-    lda     _tmp2
-    asl
-    asl
-    asl
-    asl
-    asl                     ; row * 32
-    sta     _tmp_ptr
-    lda     _tmp2
-    asl
-    asl
-    asl                     ; row * 8
-    clc
-    adc     _tmp_ptr        ; row * 40
-    clc
-    adc     _tmp1           ; + col
-    tay
-    pla
-    sta     $C000,y
-    
-    ; Bitmap address: $E000 + (row*40 + col) * 8
-    ; screen_offset = row*40 + col (just computed in A before tay)
-    ; Multiply by 8 via lookup or shift
-    ; A has the value that was in A before tay
-    ; But we don't have A anymore after sta... let me recompute
-    
-    lda     _tmp2
-    asl
-    asl
-    asl
-    asl
-    asl                     ; row * 32
-    sta     _tmp_ptr
-    lda     _tmp2
-    asl
-    asl
-    asl                     ; row * 8
-    clc
-    adc     _tmp_ptr        ; row * 40
-    clc
-    adc     _tmp1           ; + col = cell_idx
-    
-    ; byte_offset = cell_idx * 8
-    asl
-    asl
-    asl
-    sta     _tmp_ptr
     lda     #0
-    rol
-    sta     _tmp_ptr + 1
-    
-    ; bitmap_addr = $E000 + byte_offset
-    lda     _tmp_ptr
-    clc
-    adc     #$00
-    sta     _tmp_ptr
-    lda     _tmp_ptr + 1
-    adc     #$E0
-    sta     _tmp_ptr + 1
-    
-    ; Copy tile pattern to bitmap
-    txa                     ; tile type
-    asl
-    asl
-    asl                     ; * 8
-    tax
-    ldy     #0
-@copy_tile:
-    lda     tile_graphics,x
-    sta     (_tmp_ptr),y
-    inx
-    iny
-    cpy     #8
-    bne     @copy_tile
-    
-    inc     _tmp1
-    lda     _tmp1
+    sta     _tmp4           ; col
+@col_loop:
+    jsr     draw_cell
+    inc     _tmp4
+    lda     _tmp4
     cmp     #40
-    beq     @next_row_full
-    jmp     @col_loop
-@next_row_full:
+    bne     @col_loop
     inc     _tmp2
     lda     _tmp2
     cmp     #25
-    beq     @done_full
-    jmp     @row_loop
-@done_full:
+    bne     @row_loop
     rts
 
-mul_a_by_tmp1:
-    ; Multiply A by _tmp_ptr (byte), result in A
+;
+; 16-bit multiply: A * map_width -> _tmp_ptr (lo/hi)
+; Needed because map_width * row exceeds 255 for all but the top rows.
+;
+mul_map_width:
     sta     _tmp3
     lda     #0
-    ldx     _tmp_ptr
+    sta     _tmp_ptr
+    sta     _tmp_ptr + 1
+    ldx     #8
 @loop:
+    lsr     _tmp3
+    bcc     @no_add
     clc
-    adc     _tmp3
+    lda     _tmp_ptr
+    adc     map_width
+    sta     _tmp_ptr
+    lda     _tmp_ptr + 1
+    adc     #0
+    sta     _tmp_ptr + 1
+@no_add:
+    asl     _tmp_ptr
+    rol     _tmp_ptr + 1
     dex
     bne     @loop
+    lda     _tmp_ptr
+    ldy     _tmp_ptr + 1
+    rts
+
+;
+; Fetch tile at map coords (_tmp4 = row, _tmp5 = col)
+; Returns tile id in A. Clobbers _tmp1, _tmp3, _tmp_ptr, X, Y.
+;
+get_tile:
+    lda     _tmp4
+    jsr     mul_map_width
+    clc
+    lda     _tmp_ptr
+    adc     _tmp5
+    sta     _tmp_ptr
+    lda     _tmp_ptr + 1
+    adc     #0
+    sta     _tmp_ptr + 1
+    ldy     #0
+    lda     (_tmp_ptr),y
     rts
 
 ;
@@ -2121,7 +2328,7 @@ check_wall_left:
     lsr
     lsr
     lsr
-    sta     _tmp2           ; col
+    sta     _tmp5           ; col
     ; Tile row = (player_y+1 + 4) >> 3 (midpoint)
     lda     _player_y + 1
     clc
@@ -2129,14 +2336,8 @@ check_wall_left:
     lsr
     lsr
     lsr
-    sta     _tmp1           ; row
-    ldx     map_width
-    stx     _tmp_ptr
-    jsr     mul_a_by_tmp1
-    clc
-    adc     _tmp2
-    tay
-    lda     tile_map,y
+    sta     _tmp4           ; row
+    jsr     get_tile
     cmp     #0
     rts
 
@@ -2150,7 +2351,7 @@ check_wall_right:
     lsr
     lsr
     lsr
-    sta     _tmp2           ; col
+    sta     _tmp5           ; col
     ; Tile row = (player_y+1 + 4) >> 3 (midpoint)
     lda     _player_y + 1
     clc
@@ -2158,14 +2359,8 @@ check_wall_right:
     lsr
     lsr
     lsr
-    sta     _tmp1           ; row
-    ldx     map_width
-    stx     _tmp_ptr
-    jsr     mul_a_by_tmp1
-    clc
-    adc     _tmp2
-    tay
-    lda     tile_map,y
+    sta     _tmp4           ; row
+    jsr     get_tile
     cmp     #0
     rts
 
@@ -2371,7 +2566,7 @@ check_collisions:
     lsr
     lsr
     lsr
-    sta     _tmp1           ; tile row below feet
+    sta     _tmp4           ; tile row below feet
 
     ; Player tile col = (player_x+1 + 3) >> 3 (center of player)
     lda     _player_x + 1
@@ -2380,22 +2575,14 @@ check_collisions:
     lsr
     lsr
     lsr
-    sta     _tmp2           ; tile col
+    sta     _tmp5           ; tile col
 
-    ; index = row * map_width + col
-    lda     _tmp1
-    ldx     map_width
-    stx     _tmp_ptr
-    jsr     mul_a_by_tmp1
-    clc
-    adc     _tmp2
-    tay
-    lda     tile_map,y
+    jsr     get_tile
     cmp     #0
     beq     @no_floor
 
     ; Solid tile below - snap player and set ground flag
-    lda     _tmp1           ; tile row
+    lda     _tmp4           ; tile row
     asl
     asl
     asl                     ; *8 = top of tile
@@ -2703,6 +2890,9 @@ score_str:
 MAX_ENEMIES = 16
 MAX_BULLETS = 8
 MAX_PARTICLES = 32
+MAP_MAX_WIDTH = 80
+; World Y is a single pixel byte, so the map tops out at 32 rows (256 px)
+MAP_MAX_HEIGHT = 32
 
 enemy_type:     .res MAX_ENEMIES
 enemy_x:        .res MAX_ENEMIES * 2
@@ -2729,7 +2919,13 @@ particle_active:.res MAX_PARTICLES
 map_width:      .res 1
 map_height:     .res 1
 map_data_ptr:   .res 2
-tile_map:       .res 1280    ; max 80x16 level tiles
+tile_map:       .res MAP_MAX_WIDTH * MAP_MAX_HEIGHT   ; 80x48 level tiles
+
+; Self-modifying operands for vertical scroll blits.
+; Used as "lda vshift_src,y / sta vshift_dst,y"; the high byte is
+; incremented per 256-byte page while the blit walks the bitmap.
+vshift_src:     .res 2
+vshift_dst:     .res 2
 
 ; Sound engine state (3 voices)
 music_ptr0:     .res 2
