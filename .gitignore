@@ -1,0 +1,4 @@
+# Music conversion pipeline output
+anp2_c64/source_music/banks/
+anp2_c64/tools/pt2gt
+__pycache__/

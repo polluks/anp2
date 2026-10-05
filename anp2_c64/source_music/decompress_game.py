@@ -865,8 +865,9 @@ def find_pt3_modules(data):
 
 
 def main():
-    base_dir = '/root/ai/anp2'
-    out_dir = '/tmp'
+    base_dir = os.environ.get('ANP2_ROOT', '/root/ai/anp2')
+    out_dir = os.environ.get('ANP2_OUTDIR', '/tmp')
+    os.makedirs(out_dir, exist_ok=True)
     
     # Step 1: Initialize emulator
     emu = Z80Emu()
@@ -879,6 +880,10 @@ def main():
     # Map of (block_file, block_load_addr, list_of_decompress_ops)
     # Each op: (name, input_addr, output_addr, bank)
     sequence = [
+        ('extracted_block_3.bin', None, [
+            ('bank_3_a', 0x629C, 0xC000, 0),
+            ('bank_3_b', 0x65F0, 0xC000, 0),
+        ]),
         ('extracted_block_4.bin', 0x6800, [
             ('bank_0', 0x6800, 0xC000, 0),
             ('bank_1', 0x8F19, 0xC000, 1),
@@ -897,10 +902,13 @@ def main():
     all_banks = {}
     
     for block_file, load_addr, ops in sequence:
-        block_path = f'{base_dir}/{block_file}'
-        print(f"\n--- Loading {block_file} at ${load_addr:04x} ---")
-        data = load_compressed_block(emu, block_path, load_addr)
-        print(f"  Loaded {len(data)} bytes (${len(data):04x})")
+        if load_addr is None:
+            print(f"\n--- {block_file} already resident at $6000 ---")
+        else:
+            block_path = f'{base_dir}/{block_file}'
+            print(f"\n--- Loading {block_file} at ${load_addr:04x} ---")
+            data = load_compressed_block(emu, block_path, load_addr)
+            print(f"  Loaded {len(data)} bytes (${len(data):04x})")
         
         for name, input_addr, output_addr, bank in ops:
             print(f"\n  Decompressing {name}: HL=${input_addr:04x}, DE=${output_addr:04x}, A={bank}")
