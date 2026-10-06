@@ -106,14 +106,12 @@ play_music:
     ; Voice 2 = music ch1
     jsr     play_v2
     ; Voice 3 = music ch2
-    jsr     play_v3
-    rts
+    jmp     play_v3
 
 @sfx_active:
     jsr     play_v1
     jsr     play_v2
-    jsr     play_sfx_note
-    rts
+    jmp     play_sfx_note
 
 ;
 ; Voice 1 player (SID $D400, music ch0)
