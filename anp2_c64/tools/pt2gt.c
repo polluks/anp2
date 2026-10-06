@@ -364,16 +364,36 @@ static int parse_channel_data(const uint8_t *data, int size, int offset,
         /* Unknown byte - skip */
         fprintf(stderr, "; WARNING: unknown byte %02x at offset %d\n", b, pos-1);
     }
-    
+
+    /* A PT3 pattern is always 64 rows, but a channel stream ends at the 0x00
+       terminator as soon as it runs out of commands. Rows the stream does not
+       cover are empty for that channel, so pad them with silence. Without this
+       each channel emits a different number of rows for the same order entry
+       (the ingame module ranged from 0 to 64) and the three SID voices drift
+       out of step with each other. */
+    while (row < max_events) {
+        note_event_t *ev = &events[row];
+        memset(ev, 0, sizeof(*ev));
+        ev->row = row;
+        ev->note = -1;    /* rest -> gate off */
+        ev->sample = -1;  /* no sample, so print_sid_event keeps the gate off */
+        ev->ornament = -1;
+        ev->volume = 0;
+        ev->noise = -1;
+        ev->envelope = -1;
+        ev->effect = -1;
+        row++;
+    }
+
     if (end_off) *end_off = pos;
     return row;
 }
 
 /* Derive the number of pattern table entries.
-   PT3 does not store the pattern count at header offset 0x65; that byte is not
-   a reliable count. The pattern pointer table is a flat list of 16-bit offsets
-   that ends exactly where the first pattern's data begins, so the entry count is
-   (first_pointer - table_offset) / 2. */
+   Header offset $65 is the song length (order positions), not the pattern
+   count, so it cannot be used here. The pattern pointer table is a flat list
+   of 16-bit offsets that ends exactly where the first pattern's data begins,
+   so the entry count is (first_pointer - table_offset) / 2. */
 static int count_pattern_entries(const uint8_t *data, int size, int pat_off)
 {
     if (pat_off < 0 || pat_off + 2 > size) return 0;
@@ -459,23 +479,40 @@ static int find_pattern_table(const uint8_t *data, int size, int mod_start,
 }
 
 /* Read the pattern order list.
-   PT3 keeps the order list immediately in front of the pattern pointer table:
-   the entries run up to a 0xFF terminator that sits directly below the table.
-   Entries are pattern numbers, so the list is scanned backwards from the
-   terminator while the byte is a valid pattern index. Returns the count. */
-static int read_order_list(const uint8_t *data, int pat_off, int num_pat,
-                           int *order, int max_pos)
+   The list sits in front of the pattern pointer table and ends at the 0xFF
+   terminator directly below it; its length is the song length at header
+   offset $65. The entries are therefore exactly the $65 bytes in
+   [pat_off-1-len, pat_off-2].
+
+   Scanning backwards while the byte merely looks like a pattern index is not
+   enough: nothing stops that scan at the terminator, so whenever the bytes
+   ahead of the list happen to be small it runs straight into header data.
+   `Alien: intro` reads 31 positions that way instead of 2, which padded its
+   row count to ~40KB of note data and overflowed MAIN. $66 holds the loop
+   position, and it is below the length in every module here, which is a
+   useful cross-check. Returns the count, or 0 if the header disagrees. */
+static int read_order_list(const uint8_t *data, int size, int pat_off,
+                           int mod_start, int num_pat, int *order, int max_pos)
 {
-    if (pat_off < 1) return 0;
+    if (pat_off < 2 || size <= mod_start + 0x65) return 0;
     if (data[pat_off - 1] != 0xFF) return 0;
-    
-    int start = pat_off - 1;
-    while (start > 0 && data[start - 1] < num_pat) start--;
-    
+
+    int len = data[mod_start + 0x65];
+    int start = pat_off - 1 - len;
+
+    /* the list lives above the header, which reaches at least $69 */
+    if (len < 1 || start < mod_start + 0x69 || start >= pat_off - 1) return 0;
+
     int n = 0;
-    for (int i = start; i < pat_off - 1 && n < max_pos; i++)
+    for (int i = start; i < pat_off - 1 && n < max_pos && n < len; i++) {
+        if (num_pat > 0 && data[i] >= num_pat) {
+            fprintf(stderr, "; Order entry %d = %d exceeds pattern count %d\n",
+                    n, data[i], num_pat);
+            return 0;
+        }
         order[n++] = data[i];
-    
+    }
+
     return n;
 }
 
@@ -515,14 +552,28 @@ static int extract_all_notes(const uint8_t *data, int size, int mod_start,
             ch_off = dummy;
         }
         
+        /* Every pattern now contributes a full MAX_ROWS events, so check the
+           remaining room BEFORE parsing. MAX_POS * MAX_ROWS can exceed
+           MAX_NOTES, and writing a partial pattern would put the channels
+           back out of step. */
+        if (total_rows + MAX_ROWS > MAX_NOTES) {
+            fprintf(stderr, "; WARNING: row limit reached after %d rows, "
+                    "dropping order position %d\n", total_rows, i);
+            break;
+        }
+
+        int base = total_rows;
         int rows = parse_channel_data(data, size, ch_off,
-                                       all_events + total_rows,
+                                       all_events + base,
                                        MAX_ROWS, NULL);
+        /* parse_channel_data numbers rows from 0 inside each pattern, but the
+           order list plays patterns back to back, so make the index global
+           before the output loop folds runs together. Without this a gap that
+           spans a pattern boundary reads as a backwards jump. */
+        for (int k = 0; k < rows; k++)
+            all_events[base + k].row = base + k;
         row_counts[p] = rows;
         total_rows += rows;
-        
-        if (total_rows >= MAX_NOTES)
-            break;
     }
     
     return total_rows;
@@ -593,6 +644,7 @@ static int convert_module(FILE *out, const uint8_t *data, int size,
                            int override_pat, int is_title)
 {
     int speed = data[mod_start + 0x64];
+    if (speed < 1) speed = 1;   /* a 0 here would stall the player's tick counter */
     int loop = data[mod_start + 0x66];
     int num_pat = 0;
     
@@ -618,7 +670,8 @@ static int convert_module(FILE *out, const uint8_t *data, int size,
     
     /* Playback order */
     int order[MAX_POS];
-    int num_pos = read_order_list(data, pat_off, num_pat, order, MAX_POS);
+    int num_pos = read_order_list(data, size, pat_off, mod_start, num_pat,
+                                  order, MAX_POS);
     if (num_pos < 1) {
         for (int i = 0; i < num_pat && i < MAX_POS; i++) order[i] = i;
         num_pos = num_pat;
@@ -664,20 +717,68 @@ static int convert_module(FILE *out, const uint8_t *data, int size,
         
         int last_note = 24; /* default: C3 */
         int prev_row = -1;
-        
+        int have_prev = 0;
+        note_event_t prev_ev;
+        memset(&prev_ev, 0, sizeof prev_ev);
+
         for (int i = 0; i < n; i++) {
             const note_event_t *ev = &events[i];
-            
-            /* Compute delta time (difference between rows) */
-            int delta = (prev_row < 0) ? 1 : (ev->row - prev_row);
-            if (delta <= 0) delta = 1;
-            
-            /* Create a temporary event with the delta time as row */
+
+            /* Rows that drive the SID identically can be folded into a single
+               event: the delta carries the time across the gap, so the
+               registers see exactly the same byte sequence either way. The
+               padded runs of rests collapse here, which is most of the data. */
+            if (have_prev && ev->note == prev_ev.note &&
+                ev->sample == prev_ev.sample && ev->volume == prev_ev.volume)
+                continue;
+
+            /* Row gap, converted to frames. PT3 holds each row for `speed`
+               ticks of 1 frame, so a module with speed 6 keeps every row for
+               6 frames. Emitting the bare row gap plays the track `speed`
+               times too fast. */
+            int gap = (prev_row < 0) ? 1 : (ev->row - prev_row);
+            if (gap < 1) gap = 1;
+
+            /* The delta is a single byte, so a run held longer than 255
+               frames has to be chopped up. Each piece repeats the previous
+               SID state, which leaves the registers unchanged. */
+            while (have_prev && gap * speed > 255) {
+                int piece = 255 / speed;
+                if (piece < 1) piece = 1;
+                note_event_t fill = prev_ev;
+                fill.row = piece * speed;
+                print_sid_event(out, &fill, &last_note);
+                gap -= piece;
+            }
+
             note_event_t tmp = *ev;
-            tmp.row = delta;
-            
+            tmp.row = gap * speed;
             print_sid_event(out, &tmp, &last_note);
+
             prev_row = ev->row;
+            prev_ev = *ev;
+            have_prev = 1;
+        }
+
+        /* Rows folded away at the tail still have to be held, or this channel
+           stops short of the other two and drifts as soon as it restarts. */
+        if (have_prev && prev_row < n - 1) {
+            int gap = (n - 1) - prev_row;
+            while (gap * speed > 255) {
+                int piece = 255 / speed;
+                if (piece < 1) piece = 1;
+                note_event_t fill = prev_ev;
+                fill.row = piece * speed;
+                print_sid_event(out, &fill, &last_note);
+                prev_row += piece;
+                gap -= piece;
+            }
+            if (gap > 0) {
+                note_event_t fill = prev_ev;
+                fill.row = gap * speed;
+                print_sid_event(out, &fill, &last_note);
+                prev_row += gap;
+            }
         }
         
         fprintf(out, "    .byte $00  ; end\n");
