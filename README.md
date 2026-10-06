@@ -5,8 +5,8 @@ ZX Spectrum 128K game (Sanchez Crew, n1k-o, ER) ported to the Commodore 64.
 ## Build
 
 ```
-make -C anp2_c64 clean && make -C anp2_c64   # -> anp2_c64/anp2.prg (loads at $0801)
-make -C anp2_c64/source_music                # regenerate music assets from PT3
+make clean && make                          # -> anp2.prg (loads at $0801)
+make -C source_music                        # regenerate music assets from PT3
 ```
 
 ## Architecture
