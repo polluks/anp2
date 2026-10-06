@@ -4,10 +4,16 @@ ZX Spectrum 128K game (Sanchez Crew, n1k-o, ER) ported to the Commodore 64.
 
 ## Build
 
+Requires `ca65`/`ld65` (cc65 V2.19), plus `cc` and `python3` for the music
+pipeline.
+
 ```
-make clean && make                          # -> anp2.prg (loads at $0801)
-make -C source_music                        # regenerate music assets from PT3
+make                              # -> anp2.prg (loads at $0801)
+make -C source_music              # regenerate music assets from PT3
+make run                          # launch in VICE, if installed
 ```
+
+`anp2.prg` is committed, and a clean build reproduces it byte for byte.
 
 ## Architecture
 
@@ -23,9 +29,9 @@ flowchart TD
 
     subgraph mods ["Three PT3 modules packed into bank_3.bin on $200 boundaries"]
         direction LR
-        MI["ingame<br/>$0000, 27 patterns, speed 6"]
-        MV["Alien: intro<br/>$2200, 6 patterns, speed 4"]
-        MB["bossfight<br/>$2600, 9 patterns, speed 4"]
+        MI["ingame<br/>$0000, 9 patterns / 27 streams, speed 6"]
+        MV["Alien: intro<br/>$2200, 2 patterns / 6 streams, speed 4"]
+        MB["bossfight<br/>$2600, 3 patterns / 9 streams, speed 4"]
     end
 
     B3 --> MI
@@ -77,3 +83,6 @@ flowchart TD
     class MI,MV,MB,CHL,CHT,SID,SFX music
     class PRG,IRQ,SM,ST,LD,GT,PU,GO code
 ```
+
+[AGENTS.md](AGENTS.md) has the memory map, the PT3 module layout, the game
+state machine and the list of known gaps.
