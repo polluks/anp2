@@ -38,7 +38,7 @@ flowchart TD
     B3 --> MV
     B3 --> MB
 
-    P2G["tools/pt2gt<br/>PT3 pattern data to 6502 note stream"]
+    P2G["tools/pt2sid<br/>PT3 pattern data to 6502 note stream"]
     MKS["source_music/mksong.py<br/>assemble channel streams"]
 
     MI --> P2G

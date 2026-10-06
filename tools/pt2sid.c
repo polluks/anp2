@@ -1,5 +1,5 @@
 /*
- * pt2gt.c - ProTracker 3.7 module to C64 SID music converter
+ * pt2sid.c - ProTracker 3.7 module to C64 SID music converter
  *
  * Reads a binary PT3 module and outputs 6502 assembly source
  * compatible with the sound.s player format:
@@ -7,8 +7,8 @@
  *   ...
  *   .byte 0
  *
- * Build: gcc -o pt2gt pt2gt.c
- * Usage: ./pt2gt <input.pt3> [output.s] [options]
+ * Build: gcc -o pt2sid pt2sid.c
+ * Usage: ./pt2sid <input.pt3> [output.s] [options]
  *
  * Options:
  *   -load N     Module load address (default: 0x8000)
@@ -731,17 +731,7 @@ static int convert_module(FILE *out, const uint8_t *data, int size,
         fprintf(stderr, "; Channel %d: %d notes across %d positions\n", ch, n, num_pos);
         
         /* Output assembly */
-        if (is_title) {
-            if (ch == 0)
-                fprintf(out, "\nmusic_title_ch%d:\n", ch);
-            else
-                fprintf(out, "\nmusic_title_ch%d:\n", ch);
-        } else {
-            if (ch == 0)
-                fprintf(out, "\nmusic_level_ch%d:\n", ch);
-            else
-                fprintf(out, "\nmusic_level_ch%d:\n", ch);
-        }
+        fprintf(out, "\nmusic_%s_ch%d:\n", is_title ? "title" : "level", ch);
         
         int last_note = 24; /* default: C3 */
         int prev_row = -1;
@@ -850,23 +840,25 @@ int main(int argc, char *argv[]) {
     }
     
     if (infile == NULL) {
-        fprintf(stderr, "Usage: %s <input.pt3> [output.s] [options]\n", argv[0]);
-        fprintf(stderr, "Options:\n");
-        fprintf(stderr, "  -load N     Module load address (default: 0x8000)\n");
-        fprintf(stderr, "  -pat N      Pattern table offset (override)\n");
-        fprintf(stderr, "  -ch N       AY channel to convert (0-2, default: 0)\n");
-        fprintf(stderr, "  -title      Output as title music (default)\n");
-        fprintf(stderr, "  -level      Output as level music\n");
-        fprintf(stderr, "  -mod2       Use module 2 (default: module 1)\n");
-        fprintf(stderr, "  -mod2off N  Module 2 offset (default: 0x098D)\n");
-        return 1;
+        fprintf(stderr,
+                "Usage: %s <input.pt3> [output.s] [options]\n"
+                "Options:\n"
+                "  -load N     Module load address (default: 0x8000)\n"
+                "  -pat N      Pattern table offset (override)\n"
+                "  -ch N       AY channel to convert (0-2, default: 0)\n"
+                "  -title      Output as title music (default)\n"
+                "  -level      Output as level music\n"
+                "  -mod2       Use module 2 (default: module 1)\n"
+                "  -mod2off N  Module 2 offset (default: 0x098D)\n",
+                argv[0]);
+        return EXIT_FAILURE;
     }
     
     /* Read input file */
     FILE *f = fopen(infile, "rb");
     if (!f) {
         fprintf(stderr, "Error: cannot open %s\n", infile);
-        return 1;
+        return EXIT_FAILURE;
     }
     
     uint8_t data[MAX_FILE_SIZE];
@@ -875,7 +867,7 @@ int main(int argc, char *argv[]) {
     
     if (size <= 0) {
         fprintf(stderr, "Error: empty file\n");
-        return 1;
+        return EXIT_FAILURE;
     }
     
     fprintf(stderr, "; Read %d bytes from %s\n", size, infile);
@@ -893,19 +885,19 @@ int main(int argc, char *argv[]) {
         out = fopen(outfile, "w");
         if (!out) {
             fprintf(stderr, "Error: cannot write %s\n", outfile);
-            return 1;
+            return EXIT_FAILURE;
         }
     }
     
     /* Print assembly header */
-    fprintf(out, "; Converted from PT3 module\n");
-    fprintf(out, "; Source: %s\n", infile);
+    fprintf(out, "; Converted from PT3 module\n"
+                 "; Source: %s\n", infile);
     print_header_text(data, mod_start);
     if (mod_start > 0) {
         fprintf(out, "; Module offset: 0x%X\n", mod_start);
     }
-    fprintf(out, "; Speed: %d\n", data[mod_start + 0x64]);
-    fprintf(out, "; Channel: %d\n", channel);
+    fprintf(out, "; Speed: %d\n"
+                 "; Channel: %d\n", data[mod_start + 0x64], channel);
     
     /* Convert */
     convert_module(out, data, size, mod_start, load_addr,
@@ -914,5 +906,5 @@ int main(int argc, char *argv[]) {
     if (out != stdout) fclose(out);
     
     fprintf(stderr, "; Done.\n");
-    return 0;
+    return EXIT_SUCCESS;
 }

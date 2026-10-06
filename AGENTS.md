@@ -18,12 +18,12 @@ assets/sound.s      # 3-voice SID music player + SFX engine (~350 lines)
 assets/levels.s     # Level map data + enemy/item spawns
 assets/music_title.s # Title music (3 channels) — GENERATED from "Alien: intro"
 assets/music_level.s # Level music (3 channels) — GENERATED, do not hand-edit
-tools/pt2gt.c        # PT3 pattern data -> 6502 note stream converter
+tools/pt2sid.c        # PT3 pattern data -> 6502 note stream converter
 source_music/Makefile     # PT3 extraction + conversion pipeline
 source_music/decompress_game.py # Exomizer bank decompression
 source_music/mksong.py    # Assembles assets/*.s from channel streams
-source_music/music_ingame_ch{0,1,2}.s # Per-channel pt2gt output (level)
-source_music/music_intro_ch{0,1,2}.s  # Per-channel pt2gt output (title)
+source_music/music_ingame_ch{0,1,2}.s # Per-channel pt2sid output (level)
+source_music/music_intro_ch{0,1,2}.s  # Per-channel pt2sid output (title)
 ```
 
 ## Build Commands
@@ -32,10 +32,10 @@ source_music/music_intro_ch{0,1,2}.s  # Per-channel pt2gt output (title)
 - `ca65 -t c64 -g -I src -o build/foo.o foo.s` — assemble single file
 - `ld65 -C anp2.cfg -o anp2.prg build/*.o` — link manually
 - `make -C source_music` — regenerate `assets/music_level.s` **and** `assets/music_title.s` from the PT3 modules
-- `make -C source_music clean` — drop decompressed banks, modules, and the pt2gt binary
+- `make -C source_music clean` — drop decompressed banks, modules, and the pt2sid binary
 
 `assets/music_level.s` and `assets/music_title.s` are generated. Editing them by hand
-will be overwritten; change `tools/pt2gt.c` or the Makefile instead and re-run
+will be overwritten; change `tools/pt2sid.c` or the Makefile instead and re-run
 `make -C source_music`.
 
 ## Memory Map (linker config)
@@ -139,13 +139,13 @@ will be overwritten; change `tools/pt2gt.c` or the Makefile instead and re-run
 - `play_sfx(X)` — X=0=shoot, 1=explosion, 2=hurt, 3=pickup, 4=jump (called from player_shoot, etc.)
 - Music data format: delta_time, note, waveform, duty_lo, duty_hi, AD, SR, 0=end
 - **Voice mapping**: SID voice 1 = music ch0, voice 2 = music ch1, voice 3 = music ch2 (shared with SFX)
-- **3 independent channel streams**: PT3 tick patterns converted via pt2gt → 3 separate data streams
+- **3 independent channel streams**: PT3 tick patterns converted via pt2sid → 3 separate data streams
 - **SFX**: queue-based (`sfx_queue`: state, tick, ptr_lo, ptr_hi), overrides voice 3 when active; first note played immediately, subsequent notes frame-stepped until $00 end marker
 - **Music data files**: `assets/music_title.s` (`music_title_0/1/2`), `assets/music_level.s` (`music_level_0/1/2`)
 - **Level music**: speed=6, 9 patterns (27 channel streams), 13-position order list -> 1345 rows/channel. Source: `bank_3.bin` offset `$0000` (8704 bytes)
 - **Title music**: speed=4, 2 patterns (6 channel streams), **2-position** order list `[0,3]` -> 65 rows/channel. Source: `bank_3.bin` offset `$2200`, module name **"Alien: intro"** (1024 bytes)
 - **Composer**: all three modules are by **Oleg Nikitin** (`n1k-o`) — the header string is `ProTracker 3.7 compilation of ... by n1k-o`. ZXArt lists the same release under his name
-- **PT3 extraction process**: `source_music/decompress_game.py` decompresses the Spectrum blocks with Exomizer 2 and writes `banks/bank_*.bin`; the loader's 10 decompression sites are enumerated there, including two loader-internal buffers at `$629C` and `$65F0`. `tools/pt2gt` then walks the packed pattern table of a module once per channel
+- **PT3 extraction process**: `source_music/decompress_game.py` decompresses the Spectrum blocks with Exomizer 2 and writes `banks/bank_*.bin`; the loader's 10 decompression sites are enumerated there, including two loader-internal buffers at `$629C` and `$65F0`. `tools/pt2sid` then walks the packed pattern table of a module once per channel
 
 ### PT3 Module Layout (Neoplasma 2)
 `bank_3.bin` is **16383 bytes and packs three modules back to back**, each on a `$200`
@@ -284,7 +284,7 @@ assumes an increasing pointer table — grep the module headers instead:
 - **Grenades**: `_player_grenades` variable exists but no throw logic
 - **Physics**: Jump velocity uses unsigned 16-bit addition causing sprite Y to wrap through off-screen values; ceiling collision helps mitigate
 - **Enemy gravity**: Enemies pushed by gravity but no floor collision — they fall through the map
-- **pt2gt warnings**: unused variables `sid_note_lo`, `sid_note_hi`, `has_note_or_rest`, `all_events`, `row_counts`, `total_notes`
+- **pt2sid warnings**: unused variables `sid_note_lo`, `sid_note_hi`, `has_note_or_rest`, `all_events`, `row_counts`, `total_notes`
 - **`find_pt3_modules()` is over-permissive**: it still writes many false-positive `bank_*_pt3_at_*.bin` files; it is unused by the build but makes the `banks/` directory noisy
 
 ## Actions Not Allowed

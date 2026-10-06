@@ -15,7 +15,7 @@ BANKDIR  ?= banks
 MODDIR   := $(BANKDIR)/modules
 OUTDIR   := .
 
-PT2GT := $(TOOLDIR)/pt2gt
+PT2SID := $(TOOLDIR)/pt2sid
 
 # decompress_game.py reads extracted_block_*.bin from ANP2_ROOT and writes
 # bank_*.bin to ANP2_OUTDIR. Blocks 3-6 all live next to this Makefile.
@@ -31,9 +31,9 @@ ANP2_OUTDIR = $(CURDIR)/$(BANKDIR)
 MOD_BANK   := $(BANKDIR)/bank_3.bin
 
 # Offsets/lengths are decimal because dd has no hex literal syntax.
-#   $0000  Neoplasma 2: ingame      27 patterns, speed 6
-#   $2200  Alien: intro              6 patterns, speed 4   <- title screen
-#   $2600  Neoplasma 2: bossfight    9 patterns, speed 4
+#   $0000  Neoplasma 2: ingame      9 patterns (27 streams), speed 6
+#   $2200  Alien: intro              2 patterns (6 streams), speed 4   <- title screen
+#   $2600  Neoplasma 2: bossfight    3 patterns (9 streams), speed 4
 MOD_INGAME_OFF := 0
 MOD_INGAME_LEN := 8704
 MOD_INTRO_OFF := 8704
@@ -64,7 +64,7 @@ all: asset
 
 banks: $(MODULES)
 
-$(PT2GT): $(TOOLDIR)/pt2gt.c
+$(PT2SID): $(TOOLDIR)/pt2sid.c
 	$(CC) $(CFLAGS) -o $@ $<
 
 $(MODDIR)/ingame.pt3: $(MOD_BANK)
@@ -88,11 +88,11 @@ $(MOD_BANK):
 
 sid: $(SID_OUT) $(TITLE_OUT)
 
-$(OUTDIR)/music_ingame_ch%.s: $(PT2GT) $(MOD_INGAME)
-	$(PT2GT) $(MOD_INGAME) $@ -ch $* -level -load 0
+$(OUTDIR)/music_ingame_ch%.s: $(PT2SID) $(MOD_INGAME)
+	$(PT2SID) $(MOD_INGAME) $@ -ch $* -level -load 0
 
-$(OUTDIR)/music_intro_ch%.s: $(PT2GT) $(MOD_INTRO)
-	$(PT2GT) $(MOD_INTRO) $@ -ch $* -level -load 0
+$(OUTDIR)/music_intro_ch%.s: $(PT2SID) $(MOD_INTRO)
+	$(PT2SID) $(MOD_INTRO) $@ -ch $* -level -load 0
 
 asset: $(LEVEL_ASSET) $(TITLE_ASSET)
 
@@ -108,4 +108,4 @@ $(TITLE_ASSET): $(TITLE_OUT) mksong.py
 
 clean:
 	rm -rf $(BANKDIR)
-	rm -f $(PT2GT)
+	rm -f $(PT2SID)

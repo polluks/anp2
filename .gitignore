@@ -1,4 +1,4 @@
 # Music conversion pipeline output
 source_music/banks/
-tools/pt2gt
+tools/pt2sid
 __pycache__/

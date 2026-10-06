@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Assemble the game music asset from the per-channel pt2gt output streams.
+"""Assemble the game music asset from the per-channel pt2sid output streams.
 
-pt2gt emits one file per AY channel, each starting with its own comment header
+pt2sid emits one file per AY channel, each starting with its own comment header
 and a "music_level_chN:" label. The game asset needs a single file with an
 .export directive and the channels renamed to music_level_0/1/2, each stream
 closed by the $00 end marker that sound.s expects.
@@ -16,7 +16,7 @@ BYTE_RE = re.compile(r'^\s*\.byte\b', re.IGNORECASE)
 
 
 def read_channel(path):
-    """Return the .byte lines of a pt2gt channel stream, comments stripped."""
+    """Return the .byte lines of a pt2sid channel stream, comments stripped."""
     body = []
     with open(path, 'r', encoding='ascii', errors='replace') as f:
         for line in f:
