@@ -28,8 +28,8 @@
 #define MAX_FILE_SIZE   65536
 #define MAX_PATTERNS    64
 #define MAX_POS         128
-#define MAX_ROWS        64
-#define MAX_NOTES       4096
+#define MAX_ROWS        1024   /* safety cap on ONE channel stream */
+#define MAX_NOTES       8192   /* total padded rows across the order list */
 #define SID_NOTE_TABLE_SIZE  72  /* C-2 to C-7, 5 octaves */
 
 /* SID note frequency tables (lo/hi bytes) */
@@ -175,11 +175,13 @@ static int parse_channel_data(const uint8_t *data, int size, int offset,
         return 0;
     }
     
+    int ended = 0;
     while (pos < size && row < max_events) {
         uint8_t b = data[pos++];
         
         if (b == 0x00) {
             /* End of pattern */
+            ended = 1;
             break;
         }
         
@@ -365,25 +367,17 @@ static int parse_channel_data(const uint8_t *data, int size, int offset,
         fprintf(stderr, "; WARNING: unknown byte %02x at offset %d\n", b, pos-1);
     }
 
-    /* A PT3 pattern is always 64 rows, but a channel stream ends at the 0x00
-       terminator as soon as it runs out of commands. Rows the stream does not
-       cover are empty for that channel, so pad them with silence. Without this
-       each channel emits a different number of rows for the same order entry
-       (the ingame module ranged from 0 to 64) and the three SID voices drift
-       out of step with each other. */
-    while (row < max_events) {
-        note_event_t *ev = &events[row];
-        memset(ev, 0, sizeof(*ev));
-        ev->row = row;
-        ev->note = -1;    /* rest -> gate off */
-        ev->sample = -1;  /* no sample, so print_sid_event keeps the gate off */
-        ev->ornament = -1;
-        ev->volume = 0;
-        ev->noise = -1;
-        ev->envelope = -1;
-        ev->effect = -1;
-        row++;
-    }
+    /* Padding belongs to the caller. How long a pattern lasts is the length of
+       its longest channel stream, and only extract_all_notes -- which walks all
+       three -- can see that. Padding here to a fixed size would do two wrong
+       things: invent silence for patterns that are longer, and stop the walk
+       short. end_off is where the NEXT channel starts, so a stream cut off
+       before its $00 makes the following channel read out of the middle of
+       someone else's data (the ingame module ran to 127 rows per stream, and
+       the 64-row cap landed every later channel on a bogus offset). */
+    if (!ended)
+        fprintf(stderr, "; WARNING: stream at 0x%X ended without a $00 terminator%s\n",
+                offset, row >= max_events ? " (row cap hit)" : " (end of file)");
 
     if (end_off) *end_off = pos;
     return row;
@@ -524,10 +518,14 @@ static int extract_all_notes(const uint8_t *data, int size, int mod_start,
 {
     int total_rows = 0;
     note_event_t scratch[MAX_ROWS];
-    
-    /* PT3 pattern pointer tables hold ONE 16-bit pointer per pattern. That
-       pointer addresses channel 0's stream; the remaining channel streams are
-       packed immediately after it, each terminated by a 0x00 byte. */
+    int want = (channel >= 0 && channel < 3) ? channel : 0;
+
+    /* PT3 pattern pointer tables hold one 16-bit pointer PER CHANNEL STREAM:
+       a pattern is three consecutive entries (the spec's "6 bytes per
+       pattern"), and the order list stores the table index of the pattern's
+       first stream, so every order entry here is a multiple of 3. The three
+       streams are also packed back to back and each is $00-terminated, so
+       walking from the first pointer reproduces the other two. */
     for (int i = 0; i < num_pos && pat_table_off + order[i]*2 + 2 <= size; i++) {
         int p = order[i];
         int ch_addr = data[pat_table_off + p*2] | (data[pat_table_off + p*2 + 1] << 8);
@@ -542,38 +540,67 @@ static int extract_all_notes(const uint8_t *data, int size, int mod_start,
                 continue;
             }
         }
-        
-        /* Step over the streams preceding the requested channel. */
-        for (int skip = 0; skip < channel; skip++) {
-            int dummy = 0;
-            if (parse_channel_data(data, size, ch_off, scratch, MAX_ROWS,
-                                    &dummy) == 0 && dummy == ch_off)
-                break;
-            ch_off = dummy;
+
+        /* Measure all three streams before writing anything. A stream ends at
+           its $00 as soon as it runs out of commands, and the three streams of
+           one pattern are not the same length (ingame runs from 10 to 127
+           rows), so the pattern lasts as long as its longest stream. */
+        int starts[3];
+        int pat_len = 0;
+        int nstreams = 0;
+        int off = ch_off;
+        for (int c = 0; c < 3; c++) {
+            int end = 0;
+            starts[c] = off;
+            int r = parse_channel_data(data, size, off, scratch, MAX_ROWS, &end);
+            nstreams = c + 1;
+            if (r > pat_len) pat_len = r;
+            if (end <= off) break;
+            off = end;
         }
-        
-        /* Every pattern now contributes a full MAX_ROWS events, so check the
-           remaining room BEFORE parsing. MAX_POS * MAX_ROWS can exceed
-           MAX_NOTES, and writing a partial pattern would put the channels
-           back out of step. */
-        if (total_rows + MAX_ROWS > MAX_NOTES) {
+
+        if (want >= nstreams) {
+            row_counts[p] = 0;
+            continue;
+        }
+
+        /* Check the remaining room BEFORE writing: a partial pattern would put
+           the three channels back out of step with each other. */
+        if (total_rows + pat_len > MAX_NOTES) {
             fprintf(stderr, "; WARNING: row limit reached after %d rows, "
                     "dropping order position %d\n", total_rows, i);
             break;
         }
 
         int base = total_rows;
-        int rows = parse_channel_data(data, size, ch_off,
-                                       all_events + base,
-                                       MAX_ROWS, NULL);
+        int rows = parse_channel_data(data, size, starts[want],
+                                      all_events + base, MAX_ROWS, NULL);
+
+        /* Rows the stream does not cover are empty for that channel, so pad
+           them with silence. Without this each channel emits a different
+           number of rows for the same order entry and the three SID voices
+           drift out of step with each other. */
+        for (int r = rows; r < pat_len; r++) {
+            note_event_t *ev = &all_events[base + r];
+            memset(ev, 0, sizeof(*ev));
+            ev->row = base + r;
+            ev->note = -1;    /* rest -> gate off */
+            ev->sample = -1;  /* no sample, so print_sid_event keeps the gate off */
+            ev->ornament = -1;
+            ev->volume = 0;
+            ev->noise = -1;
+            ev->envelope = -1;
+            ev->effect = -1;
+        }
+
         /* parse_channel_data numbers rows from 0 inside each pattern, but the
            order list plays patterns back to back, so make the index global
            before the output loop folds runs together. Without this a gap that
            spans a pattern boundary reads as a backwards jump. */
-        for (int k = 0; k < rows; k++)
+        for (int k = 0; k < pat_len; k++)
             all_events[base + k].row = base + k;
-        row_counts[p] = rows;
-        total_rows += rows;
+        row_counts[p] = pat_len;
+        total_rows += pat_len;
     }
     
     return total_rows;
@@ -663,10 +690,11 @@ static int convert_module(FILE *out, const uint8_t *data, int size,
     
     num_pat = count_pattern_entries(data, size, pat_off);
     if (num_pat < 1) {
-        fprintf(stderr, "; ERROR: Could not derive pattern count\n");
+        fprintf(stderr, "; ERROR: Could not derive channel stream count\n");
         return -1;
     }
-    fprintf(stderr, "; Patterns: %d\n", num_pat);
+    fprintf(stderr, "; Channel stream pointers: %d%s\n", num_pat,
+            num_pat % 3 == 0 ? " (3 per pattern)" : "");
     
     /* Playback order */
     int order[MAX_POS];

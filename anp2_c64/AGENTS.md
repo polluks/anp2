@@ -142,8 +142,8 @@ will be overwritten; change `tools/pt2gt.c` or the Makefile instead and re-run
 - **3 independent channel streams**: PT3 tick patterns converted via pt2gt → 3 separate data streams
 - **SFX**: queue-based (`sfx_queue`: state, tick, ptr_lo, ptr_hi), overrides voice 3 when active; first note played immediately, subsequent notes frame-stepped until $00 end marker
 - **Music data files**: `assets/music_title.s` (`music_title_0/1/2`), `assets/music_level.s` (`music_level_0/1/2`)
-- **Level music**: speed=6, 27 patterns, 13-position order list -> 832 rows/channel. Source: `bank_3.bin` offset `$0000` (8704 bytes)
-- **Title music**: speed=4, 6 patterns, **2-position** order list `[0,3]` -> 128 rows/channel. Source: `bank_3.bin` offset `$2200`, module name **"Alien: intro"** (1024 bytes)
+- **Level music**: speed=6, 9 patterns (27 channel streams), 13-position order list -> 1345 rows/channel. Source: `bank_3.bin` offset `$0000` (8704 bytes)
+- **Title music**: speed=4, 2 patterns (6 channel streams), **2-position** order list `[0,3]` -> 65 rows/channel. Source: `bank_3.bin` offset `$2200`, module name **"Alien: intro"** (1024 bytes)
 - **Composer**: all three modules are by **Oleg Nikitin** (`n1k-o`) — the header string is `ProTracker 3.7 compilation of ... by n1k-o`. ZXArt lists the same release under his name
 - **PT3 extraction process**: `source_music/decompress_game.py` decompresses the Spectrum blocks with Exomizer 2 and writes `banks/bank_*.bin`; the loader's 10 decompression sites are enumerated there, including two loader-internal buffers at `$629C` and `$65F0`. `tools/pt2gt` then walks the packed pattern table of a module once per channel
 
@@ -151,11 +151,11 @@ will be overwritten; change `tools/pt2gt.c` or the Makefile instead and re-run
 `bank_3.bin` is **16383 bytes and packs three modules back to back**, each on a `$200`
 boundary and each carrying its own `ProTracker 3.7 compilation of ...` header:
 
-| Module | Offset | Size | Patterns | Speed | Role |
-|--------|--------|------|----------|-------|------|
-| `Neoplasma 2: ingame` | `$0000` | `$2200` | 27 | 6 | level music |
-| `Alien: intro` | `$2200` | `$0400` | 6 | 4 | **title screen** |
-| `Neoplasma 2: bossfight` | `$2600` | `$1A00` | 9 | 4 | boss music (not wired up) |
+| Module | Offset | Size | Streams | Patterns | Speed | Role |
+|--------|--------|------|---------|----------|-------|------|
+| `Neoplasma 2: ingame` | `$0000` | `$2200` | 27 | 9 | 6 | level music |
+| `Alien: intro` | `$2200` | `$0400` | 6 | 2 | 4 | **title screen** |
+| `Neoplasma 2: bossfight` | `$2600` | `$1A00` | 9 | 3 | 4 | boss music (not wired up) |
 
 > Always bound an extraction to its own `$200` slot. The earlier single 15301-byte
 > extraction ran `ingame`'s data straight through the other two headers.
@@ -171,7 +171,7 @@ Key offsets — do not assume these are standard:
 | `$66`  | loop position — always below the length (0 / 1 / 1 / 5), which cross-checks `$65` |
 | `$67`  | pattern table offset (`$00D7` / `$00CC` / `$00CD`) |
 | order list | exactly the `$65` bytes in `[pattab-1-$65, pattab-2]`, ending at a `$FF` sitting directly below the table. All four modules here start at `$C9` |
-| `$D7`+ | pattern pointer table, one 16-bit offset per pattern, stride **2** |
+| `$D7`+ | channel-stream pointer table, one 16-bit offset per entry, stride **2** bytes, **3 entries (6 bytes) per pattern**. Order-list entries index this table directly, so they are always multiples of 3 (`ingame` `0,3,6,...,24`; `intro` `0,3`; `bossfight` `6,0,3`; `Final Cut` `30,0,3,...,27`) — that is the cheapest way to tell the two readings apart |
 
 **Do not derive the order list by scanning backwards while the byte looks like a
 pattern index.** Nothing stops that scan at the `$FF` terminator, so when the header
@@ -180,36 +180,50 @@ reads **31** positions that way instead of **2** (and `Final Cut` reads 12 inste
 11), which inflated the row count until `RODATA` overflowed `MAIN` by 37 KB.
 `read_order_list()` anchors on `$FF` at `pattab-1` and takes the length from `$65`.
 
-**Pattern count cannot be read from a header field and entry 0 is not "the first
+**Stream count cannot be read from a header field and entry 0 is not "the first
 pattern".** `count_pattern_entries()` therefore scans for the candidate `n` whose
 *minimum* pointer equals `pat_off + 2*n` — the table is immediately followed by pattern
-data, so the lowest offset it contains is the address of the first stored pattern.
+data, so the lowest offset it contains is the address of the first stored stream.
 Pointers may repeat or step backwards when patterns are shared or reordered, so
 `find_pattern_table()` validates entries against `pat_off + 2*n < addr < size` rather
-than requiring them to increase.
+than requiring them to increase. The result is a count of *streams*, i.e. 3× the
+pattern count (27/6/9/33 -> 9/2/3/11).
 
 `ingame` (27) satisfies both *old* rules coincidentally — entry 0 is the first data
 address and its pointers increase — which is why the bug shipped unnoticed. The ZXArt
 reference module `nq_-_..._Final_Cut_(2023).pt3` (33) does not: its table is reordered
 and repeats pointers, and it previously failed with `ERROR: Could not find pattern table`.
 
-Pattern pointers address channel 0 only. Each pattern holds 3 channel streams packed
-back to back, each `$00`-terminated, so `parse_channel_data` reports the stream end and the
-caller steps over the preceding channels.
+A pattern's three channel streams are `$00`-terminated and packed back to back, so
+walking from the first pointer reproduces the other two — and the walk lands on
+`table[p+1]` and `table[p+2]` byte for byte in all four modules, which is the check
+that the operator widths are right. `parse_channel_data` reports each stream end, so
+the caller can step to the next one.
 
-Every order position emits a full 64 rows: a channel stream ends at its `$00` as soon
-as it runs out of commands, and `parse_channel_data` pads the rows it did not cover
-with silence. `extract_all_notes` then renumbers those rows globally across the order
-list, and `convert_module` folds runs that drive the SID identically into a single
-event whose delta spans the gap — without that fold the padded rests cost ~40KB.
-Deltas are multiplied by the module `speed` (`mksong.py --speed` only writes a comment,
-so nothing scaled them before) and split whenever a run would exceed 255 frames.
+**Pattern length is NOT a fixed 64 rows.** A stream ends at its `$00` as soon as it
+runs out of commands, and the three streams of one pattern differ a lot — `ingame`
+runs from 10 to 127 rows. The pattern lasts as long as its longest stream, so
+`extract_all_notes` measures all three, pads the requested one up to that length with
+silence, and renumbers the rows globally across the order list. `convert_module` then
+folds runs that drive the SID identically into a single event whose delta spans the
+gap — without that fold the padded rests cost ~40KB. Deltas are multiplied by the
+module `speed` (`mksong.py --speed` only writes a comment, so nothing scaled them
+before) and split whenever a run would exceed 255 frames.
+
+Padding used to happen *inside* `parse_channel_data`, at a hard-coded 64 rows. That
+was a second, worse bug: a stream cut off before its `$00` returns the wrong `end_off`,
+and `end_off` is where the next channel starts, so every channel after the first
+truncated one was reading the middle of someone else's data. It is now a `MAX_ROWS`
+(1024) safety cap that warns instead of silently truncating.
 
 | Module | speed | positions | rows/ch | frames/ch | events ch0/1/2 |
 |--------|-------|-----------|---------|-----------|----------------|
-| `ingame` (level) | 6 | 13 | 832 | 4992 | 632 / 779 / 521 |
-| `Alien: intro` (title) | 4 | 2 | 128 | 512 | 68 / 18 / 5 |
-| `Final Cut` (ZXArt fixture) | 2 | 11 | 704 | 1408 | — |
+| `ingame` (level) | 6 | 13 | 1345 | 8070 | 1173 / 854 / 536 |
+| `Alien: intro` (title) | 4 | 2 | 65 | 260 | 65 / 18 / 5 |
+| `Final Cut` (ZXArt fixture) | 2 | 11 | 507 | 1014 | 253 / 307 / 312 |
+
+`rows/ch` is the sum of the per-position pattern lengths (the longest of the three
+streams in each position), not `positions × 64`.
 
 All three channels of a track sum to exactly `rows × speed` frames — check this by
 parsing the generated `.s`, it is the property that keeps playback in step. `play_v3`'s
@@ -249,18 +263,18 @@ assumes an increasing pointer table — grep the module headers instead:
 - `draw_col(Y, _tmp1)`: Y = screen column (0 or 39), `_tmp1` = tile map column
 
 ## Current Status (Jun 2026)
-- **3-voice music playback**: level and title both convert and link (level from `bank_3.bin` `$0000`, title from `$2200` "Alien: intro"). Channels are padded to equal length: level 832 rows/channel (4992 frames), title 128 (512)
+- **3-voice music playback**: level and title both convert and link (level from `bank_3.bin` `$0000`, title from `$2200` "Alien: intro"). Channels are padded to the length of the pattern's longest stream, so all three stay in step: level 1345 rows/channel (8070 frames), title 65 (260)
 - **Music looping**: each channel wraps to **its own** `music_startN` when it hits its `$00` end marker, but all three now end on the same frame so the restarts stay in step
 - **SFX**: queue-based on voice 3, 5 effects (shoot, explosion, hurt, pickup, jump)
 - **HUD**: Text-mode status bar at top of screen — HP, ammo, score (5-digit) rendered via bitmap font
 - **Wall collision**: Horizontal + ceiling collision with tile map
 - **Item pickup**: 4 item types (weapon upgrade, health, ammo, keycard) placed on tile map, collision checked each frame, pickup SFX
 - **Enemy AI**: Patrol mode (direction toggle every ~60 frames, move 1px/frame) when player >96px away; chase mode (2px/frame toward player, shoot every ~60 frames) when closer
-- **Build**: `make` produces `anp2.prg` (31288 bytes)
+- **Build**: `make` produces `anp2.prg` (35684 bytes)
 
 ## Known Issues & Missing Features
 - **Title music is probably inaudible**: `Alien: intro`'s only note byte anywhere in its channel streams is `$59` (AY index 9 = A-1), and `ay_to_sid_note()` computes `note - 12` with a floor of 0, so it lands on `note_table` index 0 = frequency 0. The title therefore renders as one inaudible note plus rests on all three channels. Level music is unaffected (AY 44-56 -> SID 32-44)
-- **`Alien: intro` order list may be too short**: `$65` says 2 positions `[0,3]`, but the module packs 6 patterns and patterns 4/5 hold the only varied pitches (`$8B`/`$8C`/`$81`). If the real list is longer, that melody is being dropped — worth confirming against an AY emulator before trusting the title track
+- **`MAIN` has only ~193 bytes of headroom**: after the pattern-length fix, `BSS` ends at `$9F3F` and `MAIN` runs to `$A000`. `RODATA` is ~31 KB of which ~18 KB is music. Any further data growth needs a size check first — run `ld65 -C anp2.cfg -m map.txt build/*.o` and read the segment table (the link will fail rather than corrupt if it overflows, but the fix would be data, not code)
 - **Ornaments are parsed but never applied**: `ev->ornament` reaches the output comment only; PT3 ornaments shift the note pitch per row and `print_sid_event()` ignores them
 - **`bossfight` module extracted but not wired**: `bank_3.bin` `$2600` is extracted to `banks/modules/bossfight.pt3` by `make -C source_music banks`, but nothing calls `start_music` for it — no boss state exists. Also note the bank is 16383 bytes while the third slot ends at 16384, so the last byte is truncated by `dd`
 - **Vertical scrolling unverified at runtime**: implemented in `src/anp2.s` (16-bit tile indexing, vertical camera offset, row blits/redraws, one shifted row per rendered frame, `_scroll_x_prev` fix, Level 1 start row 12). Compiles and links cleanly but has not been confirmed in an emulator — see VICE note below
