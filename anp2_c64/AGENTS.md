@@ -16,13 +16,14 @@ assets/screen.s     # Title/loading screen graphics placeholders
 assets/sprites.s    # Player, enemy, bullet sprite data (hires, no multicolor)
 assets/sound.s      # 3-voice SID music player + SFX engine (~350 lines)
 assets/levels.s     # Level map data + enemy/item spawns
-assets/music_title.s # Title music (3 channels) — BROKEN, see Known Issues
+assets/music_title.s # Title music (3 channels) — GENERATED from "Alien: intro"
 assets/music_level.s # Level music (3 channels) — GENERATED, do not hand-edit
 tools/pt2gt.c        # PT3 pattern data -> 6502 note stream converter
 source_music/Makefile     # PT3 extraction + conversion pipeline
 source_music/decompress_game.py # Exomizer bank decompression
-source_music/mksong.py    # Assembles assets/music_level.s from channel streams
-source_music/music_ingame_ch{0,1,2}.s # Per-channel pt2gt output
+source_music/mksong.py    # Assembles assets/*.s from channel streams
+source_music/music_ingame_ch{0,1,2}.s # Per-channel pt2gt output (level)
+source_music/music_intro_ch{0,1,2}.s  # Per-channel pt2gt output (title)
 ```
 
 ## Build Commands
@@ -30,11 +31,12 @@ source_music/music_ingame_ch{0,1,2}.s # Per-channel pt2gt output
 - `make clean` — remove build artifacts
 - `ca65 -t c64 -g -I src -o build/foo.o foo.s` — assemble single file
 - `ld65 -C anp2.cfg -o anp2.prg build/*.o` — link manually
-- `make -C source_music` — regenerate `assets/music_level.s` from the PT3 module
+- `make -C source_music` — regenerate `assets/music_level.s` **and** `assets/music_title.s` from the PT3 modules
 - `make -C source_music clean` — drop decompressed banks, modules, and the pt2gt binary
 
-`assets/music_level.s` is generated. Editing it by hand will be overwritten; change
-`tools/pt2gt.c` or the Makefile instead and re-run `make -C source_music`.
+`assets/music_level.s` and `assets/music_title.s` are generated. Editing them by hand
+will be overwritten; change `tools/pt2gt.c` or the Makefile instead and re-run
+`make -C source_music`.
 
 ## Memory Map (linker config)
 | Address   | Use                      |
@@ -140,32 +142,69 @@ source_music/music_ingame_ch{0,1,2}.s # Per-channel pt2gt output
 - **3 independent channel streams**: PT3 tick patterns converted via pt2gt → 3 separate data streams
 - **SFX**: queue-based (`sfx_queue`: state, tick, ptr_lo, ptr_hi), overrides voice 3 when active; first note played immediately, subsequent notes frame-stepped until $00 end marker
 - **Music data files**: `assets/music_title.s` (`music_title_0/1/2`), `assets/music_level.s` (`music_level_0/1/2`)
-- **Level music**: speed=6, 27 patterns, 13-position order list. Source: `bank_3.bin` offset 0x0000, 15301 bytes
-- **Title music**: broken — see Known Issues. There is no title PT3 module in the game
-- **PT3 extraction process**: `source_music/decompress_game.py` decompresses the Spectrum blocks with Exomizer 2 and writes `banks/bank_*.bin`; the loader's 10 decompression sites are enumerated there, including two loader-internal buffers at `$629C` and `$65F0`. `tools/pt2gt` then walks the packed pattern table of `banks/modules/ingame.pt3` once per channel
+- **Level music**: speed=6, 27 patterns, 13-position order list. Source: `bank_3.bin` offset `$0000` (8704 bytes)
+- **Title music**: speed=4, 6 patterns, 31-position order list. Source: `bank_3.bin` offset `$2200`, module name **"Alien: intro"** (1024 bytes)
+- **Composer**: all three modules are by **Oleg Nikitin** (`n1k-o`) — the header string is `ProTracker 3.7 compilation of ... by n1k-o`. ZXArt lists the same release under his name
+- **PT3 extraction process**: `source_music/decompress_game.py` decompresses the Spectrum blocks with Exomizer 2 and writes `banks/bank_*.bin`; the loader's 10 decompression sites are enumerated there, including two loader-internal buffers at `$629C` and `$65F0`. `tools/pt2gt` then walks the packed pattern table of a module once per channel
 
 ### PT3 Module Layout (Neoplasma 2)
-The only genuine module in this build is `bank_3.bin` @ `0x0000`, whose header names it
-"ingame ... by n1k-o". Key offsets — do not assume these are standard:
+`bank_3.bin` is **16383 bytes and packs three modules back to back**, each on a `$200`
+boundary and each carrying its own `ProTracker 3.7 compilation of ...` header:
+
+| Module | Offset | Size | Patterns | Speed | Role |
+|--------|--------|------|----------|-------|------|
+| `Neoplasma 2: ingame` | `$0000` | `$2200` | 27 | 6 | level music |
+| `Alien: intro` | `$2200` | `$0400` | 6 | 4 | **title screen** |
+| `Neoplasma 2: bossfight` | `$2600` | `$1A00` | 9 | 4 | boss music (not wired up) |
+
+> Always bound an extraction to its own `$200` slot. The earlier single 15301-byte
+> extraction ran `ingame`'s data straight through the other two headers.
+> `dd` has no hex literal syntax — `count=0x2200` parses as **0**, so offsets and
+> lengths are decimal in the Makefile.
+
+Key offsets — do not assume these are standard:
 
 | Offset | Meaning |
 |--------|---------|
-| `$64`  | speed = 6 |
-| `$65`  | **not** the pattern count (previously misread as `numpat-1`) |
-| `$67`  | pattern table offset = `$00D7` |
-| `$C9`  | pattern order list, 13 entries, `$FF`-terminated |
-| `$D6`  | `$FF` order terminator |
-| `$D7`  | pattern pointer table, one 16-bit offset per pattern, stride **2** |
-| `$10D` | pattern 0 data — table size is `($10D-$D7)/2` = 27 patterns |
+| `$64`  | speed (6 / 4 / 4) |
+| `$65`  | song length — **not** the pattern count (previously misread as `numpat-1`, and it is not even reliable as song length: it reads 11 for `Final Cut` but the real order list has 12 entries) |
+| `$67`  | pattern table offset (`$00D7` / `$00CC` / `$00CD`) |
+| `$C8`+ | pattern order list, `$FF`-terminated — the start offset varies per module, and length ranges from 3 (`bossfight`) to 31 (`Alien: intro`) entries |
+| `$D7`+ | pattern pointer table, one 16-bit offset per pattern, stride **2** |
+
+**Pattern count cannot be read from a header field and entry 0 is not "the first
+pattern".** `count_pattern_entries()` therefore scans for the candidate `n` whose
+*minimum* pointer equals `pat_off + 2*n` — the table is immediately followed by pattern
+data, so the lowest offset it contains is the address of the first stored pattern.
+Pointers may repeat or step backwards when patterns are shared or reordered, so
+`find_pattern_table()` validates entries against `pat_off + 2*n < addr < size` rather
+than requiring them to increase.
+
+`ingame` (27) satisfies both *old* rules coincidentally — entry 0 is the first data
+address and its pointers increase — which is why the bug shipped unnoticed. The ZXArt
+reference module `nq_-_..._Final_Cut_(2023).pt3` (33) does not: its table is reordered
+and repeats pointers, and it previously failed with `ERROR: Could not find pattern table`.
 
 Pattern pointers address channel 0 only. Each pattern holds 3 channel streams packed
 back to back, each `$00`-terminated, so `parse_channel_data` reports the stream end and the
-caller steps over the preceding channels. Order list: `0 3 6 9 12 15 18 21 12 15 18 9 24`.
-The module ends at `0x3BC5`; the rest of the 16383-byte bank is padding.
+caller steps over the preceding channels.
 
-Converted result: 624 / 769 / 562 notes for channels 0 / 1 / 2, no unhandled opcodes.
-A structural scan (`order list + $FF + pointer table`) over all 92 decompressed files finds
-no second module.
+Converted results (no unhandled opcodes):
+
+| Module | ch0 | ch1 | ch2 |
+|--------|-----|-----|-----|
+| ingame | 624 | 769 | 562 |
+| Alien: intro (title) | 206 | 44 | 90 |
+
+**Looping caveat**: `play_v3`-style `@stop` handlers restart each channel from its own
+`music_startN` when it hits `$00`, independently of the other two. Because the channels
+have different lengths, the shorter ones loop early and drift apart. This affects the
+level and title tracks equally and is a property of `assets/sound.s`, not of the
+conversion.
+
+A naive structural scan over all decompressed files reports only one module because it
+assumes an increasing pointer table — grep the module headers instead:
+`re.finditer(b'ProTracker 3.7', bank)` finds all three.
 
 ## Game Logic Details
 
@@ -195,17 +234,18 @@ no second module.
 - `draw_col(Y, _tmp1)`: Y = screen column (0 or 39), `_tmp1` = tile map column
 
 ## Current Status (Jun 2026)
-- **3-voice music playback**: working for level music (3-channel player, data generated from `bank_3.bin` @0). Title music is broken — see Known Issues
-- **Music looping**: Music wraps to start when end marker ($00) reached on all 3 channels
+- **3-voice music playback**: working for level **and** title music (3-channel player; level from `bank_3.bin` `$0000`, title from `$2200` "Alien: intro"). Note counts: level 624/769/562, title 206/44/90
+- **Music looping**: each channel wraps to **its own** `music_startN` when it hits its `$00` end marker — they do *not* wait for the others, so tracks whose channels differ in length drift apart
 - **SFX**: queue-based on voice 3, 5 effects (shoot, explosion, hurt, pickup, jump)
 - **HUD**: Text-mode status bar at top of screen — HP, ammo, score (5-digit) rendered via bitmap font
 - **Wall collision**: Horizontal + ceiling collision with tile map
 - **Item pickup**: 4 item types (weapon upgrade, health, ammo, keycard) placed on tile map, collision checked each frame, pickup SFX
 - **Enemy AI**: Patrol mode (direction toggle every ~60 frames, move 1px/frame) when player >96px away; chase mode (2px/frame toward player, shoot every ~60 frames) when closer
-- **Build**: `make` produces `anp2.prg` (31957 bytes)
+- **Build**: `make` produces `anp2.prg` (33192 bytes)
 
 ## Known Issues & Missing Features
-- **Title music is broken**: `assets/music_title.s` is a conversion of `bank_1.bin` @ `0x98D`, which is not a PT3 module — it is Spectrum attribute/shape data for the title logo (`$4C`/`$4E` = bright white/yellow attributes, `$1F` padding). It references sample IDs 38-255 where PT3 only has 31, so it plays garbage. Fix by silencing it or finding a non-PT3 title tune; the original game appears to ship only the "ingame" module
+- **Title/level channel lengths differ**: channels restart independently at `$00`, so the short channel of a track (e.g. title ch1 = 44 events vs ch0 = 206) loops early and drifts out of phase. Fix would need the converter to pad every channel to the full row count with hold events, or the player to hold a finished channel until all three stop
+- **`bossfight` module extracted but not wired**: `bank_3.bin` `$2600` is extracted to `banks/modules/bossfight.pt3` by `make -C source_music banks`, but nothing calls `start_music` for it — no boss state exists. Also note the bank is 16383 bytes while the third slot ends at 16384, so the last byte is truncated by `dd`
 - **Vertical scrolling unverified at runtime**: implemented in `src/anp2.s` (16-bit tile indexing, vertical camera offset, row blits/redraws, one shifted row per rendered frame, `_scroll_x_prev` fix, Level 1 start row 12). Compiles and links cleanly but has not been confirmed in an emulator — see VICE note below
 - **VICE validation blocked**: `x64sc` autostart halts at BASIC `searching for anp2` / `loading` and reports `Main CPU: Error - cycle limit reached.`; remote-monitor never reaches `render_frame`. Emulator verification of both scrolling and the rebuilt music is still outstanding
 - **Pause**: State 3 handler not implemented
