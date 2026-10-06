@@ -142,8 +142,8 @@ will be overwritten; change `tools/pt2gt.c` or the Makefile instead and re-run
 - **3 independent channel streams**: PT3 tick patterns converted via pt2gt → 3 separate data streams
 - **SFX**: queue-based (`sfx_queue`: state, tick, ptr_lo, ptr_hi), overrides voice 3 when active; first note played immediately, subsequent notes frame-stepped until $00 end marker
 - **Music data files**: `assets/music_title.s` (`music_title_0/1/2`), `assets/music_level.s` (`music_level_0/1/2`)
-- **Level music**: speed=6, 27 patterns, 13-position order list. Source: `bank_3.bin` offset `$0000` (8704 bytes)
-- **Title music**: speed=4, 6 patterns, 31-position order list. Source: `bank_3.bin` offset `$2200`, module name **"Alien: intro"** (1024 bytes)
+- **Level music**: speed=6, 27 patterns, 13-position order list -> 832 rows/channel. Source: `bank_3.bin` offset `$0000` (8704 bytes)
+- **Title music**: speed=4, 6 patterns, **2-position** order list `[0,3]` -> 128 rows/channel. Source: `bank_3.bin` offset `$2200`, module name **"Alien: intro"** (1024 bytes)
 - **Composer**: all three modules are by **Oleg Nikitin** (`n1k-o`) — the header string is `ProTracker 3.7 compilation of ... by n1k-o`. ZXArt lists the same release under his name
 - **PT3 extraction process**: `source_music/decompress_game.py` decompresses the Spectrum blocks with Exomizer 2 and writes `banks/bank_*.bin`; the loader's 10 decompression sites are enumerated there, including two loader-internal buffers at `$629C` and `$65F0`. `tools/pt2gt` then walks the packed pattern table of a module once per channel
 
@@ -167,10 +167,18 @@ Key offsets — do not assume these are standard:
 | Offset | Meaning |
 |--------|---------|
 | `$64`  | speed (6 / 4 / 4) |
-| `$65`  | song length — **not** the pattern count (previously misread as `numpat-1`, and it is not even reliable as song length: it reads 11 for `Final Cut` but the real order list has 12 entries) |
+| `$65`  | **song length = order-list length**, reliable in every module here (13 / 2 / 3 / 11 for `ingame` / `intro` / `bossfight` / `Final Cut`). It is *not* the pattern count |
+| `$66`  | loop position — always below the length (0 / 1 / 1 / 5), which cross-checks `$65` |
 | `$67`  | pattern table offset (`$00D7` / `$00CC` / `$00CD`) |
-| `$C8`+ | pattern order list, `$FF`-terminated — the start offset varies per module, and length ranges from 3 (`bossfight`) to 31 (`Alien: intro`) entries |
+| order list | exactly the `$65` bytes in `[pattab-1-$65, pattab-2]`, ending at a `$FF` sitting directly below the table. All four modules here start at `$C9` |
 | `$D7`+ | pattern pointer table, one 16-bit offset per pattern, stride **2** |
+
+**Do not derive the order list by scanning backwards while the byte looks like a
+pattern index.** Nothing stops that scan at the `$FF` terminator, so when the header
+bytes ahead of the list happen to be small it runs straight into them: `Alien: intro`
+reads **31** positions that way instead of **2** (and `Final Cut` reads 12 instead of
+11), which inflated the row count until `RODATA` overflowed `MAIN` by 37 KB.
+`read_order_list()` anchors on `$FF` at `pattab-1` and takes the length from `$65`.
 
 **Pattern count cannot be read from a header field and entry 0 is not "the first
 pattern".** `count_pattern_entries()` therefore scans for the candidate `n` whose
@@ -189,18 +197,25 @@ Pattern pointers address channel 0 only. Each pattern holds 3 channel streams pa
 back to back, each `$00`-terminated, so `parse_channel_data` reports the stream end and the
 caller steps over the preceding channels.
 
-Converted results (no unhandled opcodes):
+Every order position emits a full 64 rows: a channel stream ends at its `$00` as soon
+as it runs out of commands, and `parse_channel_data` pads the rows it did not cover
+with silence. `extract_all_notes` then renumbers those rows globally across the order
+list, and `convert_module` folds runs that drive the SID identically into a single
+event whose delta spans the gap — without that fold the padded rests cost ~40KB.
+Deltas are multiplied by the module `speed` (`mksong.py --speed` only writes a comment,
+so nothing scaled them before) and split whenever a run would exceed 255 frames.
 
-| Module | ch0 | ch1 | ch2 |
-|--------|-----|-----|-----|
-| ingame | 624 | 769 | 562 |
-| Alien: intro (title) | 206 | 44 | 90 |
+| Module | speed | positions | rows/ch | frames/ch | events ch0/1/2 |
+|--------|-------|-----------|---------|-----------|----------------|
+| `ingame` (level) | 6 | 13 | 832 | 4992 | 632 / 779 / 521 |
+| `Alien: intro` (title) | 4 | 2 | 128 | 512 | 68 / 18 / 5 |
+| `Final Cut` (ZXArt fixture) | 2 | 11 | 704 | 1408 | — |
 
-**Looping caveat**: `play_v3`-style `@stop` handlers restart each channel from its own
-`music_startN` when it hits `$00`, independently of the other two. Because the channels
-have different lengths, the shorter ones loop early and drift apart. This affects the
-level and title tracks equally and is a property of `assets/sound.s`, not of the
-conversion.
+All three channels of a track sum to exactly `rows × speed` frames — check this by
+parsing the generated `.s`, it is the property that keeps playback in step. `play_v3`'s
+`@stop` handlers still restart each channel from its own `music_startN` independently
+when it hits `$00`, but since every channel now ends on the same frame the restarts
+stay together.
 
 A naive structural scan over all decompressed files reports only one module because it
 assumes an increasing pointer table — grep the module headers instead:
@@ -234,17 +249,19 @@ assumes an increasing pointer table — grep the module headers instead:
 - `draw_col(Y, _tmp1)`: Y = screen column (0 or 39), `_tmp1` = tile map column
 
 ## Current Status (Jun 2026)
-- **3-voice music playback**: working for level **and** title music (3-channel player; level from `bank_3.bin` `$0000`, title from `$2200` "Alien: intro"). Note counts: level 624/769/562, title 206/44/90
-- **Music looping**: each channel wraps to **its own** `music_startN` when it hits its `$00` end marker — they do *not* wait for the others, so tracks whose channels differ in length drift apart
+- **3-voice music playback**: level and title both convert and link (level from `bank_3.bin` `$0000`, title from `$2200` "Alien: intro"). Channels are padded to equal length: level 832 rows/channel (4992 frames), title 128 (512)
+- **Music looping**: each channel wraps to **its own** `music_startN` when it hits its `$00` end marker, but all three now end on the same frame so the restarts stay in step
 - **SFX**: queue-based on voice 3, 5 effects (shoot, explosion, hurt, pickup, jump)
 - **HUD**: Text-mode status bar at top of screen — HP, ammo, score (5-digit) rendered via bitmap font
 - **Wall collision**: Horizontal + ceiling collision with tile map
 - **Item pickup**: 4 item types (weapon upgrade, health, ammo, keycard) placed on tile map, collision checked each frame, pickup SFX
 - **Enemy AI**: Patrol mode (direction toggle every ~60 frames, move 1px/frame) when player >96px away; chase mode (2px/frame toward player, shoot every ~60 frames) when closer
-- **Build**: `make` produces `anp2.prg` (33192 bytes)
+- **Build**: `make` produces `anp2.prg` (31288 bytes)
 
 ## Known Issues & Missing Features
-- **Title/level channel lengths differ**: channels restart independently at `$00`, so the short channel of a track (e.g. title ch1 = 44 events vs ch0 = 206) loops early and drifts out of phase. Fix would need the converter to pad every channel to the full row count with hold events, or the player to hold a finished channel until all three stop
+- **Title music is probably inaudible**: `Alien: intro`'s only note byte anywhere in its channel streams is `$59` (AY index 9 = A-1), and `ay_to_sid_note()` computes `note - 12` with a floor of 0, so it lands on `note_table` index 0 = frequency 0. The title therefore renders as one inaudible note plus rests on all three channels. Level music is unaffected (AY 44-56 -> SID 32-44)
+- **`Alien: intro` order list may be too short**: `$65` says 2 positions `[0,3]`, but the module packs 6 patterns and patterns 4/5 hold the only varied pitches (`$8B`/`$8C`/`$81`). If the real list is longer, that melody is being dropped — worth confirming against an AY emulator before trusting the title track
+- **Ornaments are parsed but never applied**: `ev->ornament` reaches the output comment only; PT3 ornaments shift the note pitch per row and `print_sid_event()` ignores them
 - **`bossfight` module extracted but not wired**: `bank_3.bin` `$2600` is extracted to `banks/modules/bossfight.pt3` by `make -C source_music banks`, but nothing calls `start_music` for it — no boss state exists. Also note the bank is 16383 bytes while the third slot ends at 16384, so the last byte is truncated by `dd`
 - **Vertical scrolling unverified at runtime**: implemented in `src/anp2.s` (16-bit tile indexing, vertical camera offset, row blits/redraws, one shifted row per rendered frame, `_scroll_x_prev` fix, Level 1 start row 12). Compiles and links cleanly but has not been confirmed in an emulator — see VICE note below
 - **VICE validation blocked**: `x64sc` autostart halts at BASIC `searching for anp2` / `loading` and reports `Main CPU: Error - cycle limit reached.`; remote-monitor never reaches `render_frame`. Emulator verification of both scrolling and the rebuilt music is still outstanding
