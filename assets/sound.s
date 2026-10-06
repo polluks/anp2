@@ -181,7 +181,17 @@ play_v1:
     sta     music_ptr0+1
     lda     #1
     sta     music_tick0
-    jmp     play_v1
+    ; fall through to play_v1 entry
+    lda     music_ptr0
+    sta     _tmp_ptr
+    lda     music_ptr0+1
+    sta     _tmp_ptr+1
+    ldy     #0
+    lda     (_tmp_ptr),y
+    beq     @stop
+    dec     music_tick0
+    beq     @play
+    rts
 
 ;
 ; Voice 2 player (SID $D407, music ch1)
@@ -249,7 +259,16 @@ play_v2:
     sta     music_ptr1+1
     lda     #1
     sta     music_tick1
-    jmp     play_v2
+    lda     music_ptr1
+    sta     _tmp_ptr
+    lda     music_ptr1+1
+    sta     _tmp_ptr+1
+    ldy     #0
+    lda     (_tmp_ptr),y
+    beq     @stop
+    dec     music_tick1
+    beq     @play
+    rts
 
 ;
 ; Voice 3 player (SID $D40E, music ch2)
@@ -317,7 +336,16 @@ play_v3:
     sta     music_ptr2+1
     lda     #1
     sta     music_tick2
-    jmp     play_v3
+    lda     music_ptr2
+    sta     _tmp_ptr
+    lda     music_ptr2+1
+    sta     _tmp_ptr+1
+    ldy     #0
+    lda     (_tmp_ptr),y
+    beq     @stop
+    dec     music_tick2
+    beq     @play
+    rts
 
 ;
 ; Start playing a music track
