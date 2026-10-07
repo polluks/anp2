@@ -16,6 +16,11 @@
 .define CIA1     $DC00
 .define CIA2     $DD00
 
+; Player physics constants (signed velocity in _player_vy)
+PLAYER_GRAVITY  = 4    ; vertical acceleration (px/frame^2)
+PLAYER_JUMP_VY  = $F0  ; jump velocity (-16 px/frame)
+PLAYER_MAX_FALL = 8    ; terminal fall speed, capped at one tile per frame
+
 ; Import symbols from asset files
 .import player_sprite, enemy_xeno, enemy_guard, bullet_sprite
 .import tile_graphics, tile_color_table
@@ -71,6 +76,7 @@ _scroll_y:        .res 1    ; vertical scroll
 _keyboard_state:  .res 2    ; keyboard matrix state
 _joystick_state:  .res 1    ; joystick direction + fire
 _on_ground:       .res 1    ; 1 = player on solid ground
+_player_vy:       .res 1    ; signed player vertical velocity (px/frame)
 _invincible_timer:.res 1    ; invincibility countdown after hit
 _tmp1:            .res 1    ; temporary storage
 _tmp2:            .res 1
@@ -385,6 +391,9 @@ start_game:
     sta     _player_y + 1
     lda     #$00
     sta     _player_y
+    sta     _player_vy
+    lda     #1
+    sta     _on_ground
 
     lda     #1
     jsr     start_music
@@ -483,19 +492,77 @@ update_player:
     dec     _invincible_timer
 @skip_inv_dec:
 
-    ; Clear ground flag (floor collision will re-set if on ground)
-    lda     #$00
-    sta     _on_ground
-
-    ; Apply gravity
-    lda     _player_y+1
+    ; Apply gravity to velocity, capped at terminal fall speed. A rising
+    ; (negative) velocity is never clamped; only the downward speed is.
+    lda     _player_vy
     clc
-    adc     #$04            ; gravity acceleration
-    sta     _player_y+1
-    lda     _player_y
-    adc     #$00
-    sta     _player_y
+    adc     #PLAYER_GRAVITY
+    bmi     @gravity_ok
+    cmp     #PLAYER_MAX_FALL
+    bcc     @gravity_ok
+    lda     #PLAYER_MAX_FALL
+@gravity_ok:
+    sta     _player_vy
 
+    ; Integrate velocity into position (_player_y is 16-bit, +1 = pixel).
+    ; _player_vy is signed: add downward, subtract upward.
+    lda     _player_vy
+    bmi     @vy_negative
+
+    ; vy >= 0: 16-bit add
+    lda     _player_y
+    clc
+    adc     _player_vy
+    sta     _player_y
+    lda     _player_y + 1
+    adc     #0
+    sta     _player_y + 1
+    bcs     @vy_integrated   ; carried past the 16-bit field: leave as-is
+
+    ; Clamp descent to the bottom of the level. The position is 16-bit so it
+    ; cannot wrap at 256, but the VIC register is still 8-bit: a fall into an
+    ; open pit would keep growing the world Y and the sprite would reappear at
+    ; the top of the screen. Pin the player to the last map row instead.
+    lda     map_height
+    asl
+    asl
+    asl                     ; height * 8
+    beq     @vy_integrated  ; height wraps a byte (tall map): skip clamp
+    sec
+    sbc     #8              ; bottom pixel of playable area
+    beq     @vy_integrated  ; degenerate height
+    cmp     _player_y + 1
+    bcs     @vy_integrated  ; still above the bottom
+    sta     _player_y + 1
+    lda     #0
+    sta     _player_y
+    sta     _player_vy
+    jmp     @vy_integrated
+
+@vy_negative:
+    ; vy < 0: magnitude = -vy, 16-bit subtract
+    lda     _player_vy
+    eor     #$FF
+    clc
+    adc     #1
+    sta     _tmp1
+    lda     _player_y
+    sec
+    sbc     _tmp1
+    sta     _player_y
+    lda     _player_y + 1
+    sbc     #0
+    bcc     @clamp_top      ; borrowed below zero
+    jmp     @vy_integrated
+
+@clamp_top:
+    ; Jumped above the top of the level: pin to row 0, kill velocity
+    lda     #0
+    sta     _player_y
+    sta     _player_y + 1
+    sta     _player_vy
+
+@vy_integrated:
     ; Ceiling collision check (player head hitting solid tile above)
     lda     _player_y + 1
     lsr
@@ -512,7 +579,7 @@ update_player:
     jsr     get_tile
     cmp     #0
     beq     @no_ceiling
-    ; Hit head - snap down, zero subpixel
+    ; Hit head - snap down, zero velocity and subpixel
     lda     _tmp4
     asl
     asl
@@ -522,6 +589,7 @@ update_player:
     sta     _player_y + 1
     lda     #$00
     sta     _player_y
+    sta     _player_vy
 @no_ceiling:
 
     ; Handle horizontal movement with wall collision
@@ -582,14 +650,17 @@ update_player:
 @skip_anim:
 @h_movement_done:
 
-    ; Handle jumping
+    ; Handle jumping. _on_ground was left set by the previous frame's floor
+    ; check, so it still reflects ground contact from before gravity moved.
     lda     _tmp2
     and     #$01            ; up
     beq     @jump_done
     lda     _on_ground
     beq     @jump_done
-    lda     #$F0            ; jump velocity (-16)
-    sta     _player_y+1
+    lda     #PLAYER_JUMP_VY
+    sta     _player_vy
+    lda     #0
+    sta     _on_ground      ; leave the ground: no double jump
     ldx     #4              ; jump SFX
     jsr     play_sfx
 @jump_done:
@@ -2580,8 +2651,10 @@ check_collisions:
     jsr     get_tile
     cmp     #0
     beq     @no_floor
+    lda     _player_vy
+    bmi     @no_floor       ; ascending: let the jump leave the ground
 
-    ; Solid tile below - snap player and set ground flag
+    ; Solid tile below - snap player, zero velocity and set ground flag
     lda     _tmp4           ; tile row
     asl
     asl
@@ -2591,6 +2664,7 @@ check_collisions:
     sta     _player_y + 1
     lda     #$00
     sta     _player_y
+    sta     _player_vy
     lda     #1
     sta     _on_ground
 

@@ -238,10 +238,14 @@ assumes an increasing pointer table — grep the module headers instead:
 ## Game Logic Details
 
 ### Player Physics
-- Gravity: +4 per frame to _player_y (subpixel)
-- Jump: velocity = -16 (up), only when `_on_ground` is set
-- Horizontal speed: 2 pixels per frame
-- Floor collision: checks tile directly below player feet (bottom + 1 row), snaps to tile top, sets `_on_ground = 1`
+- `_player_vy` (1 byte, signed) is the vertical velocity in `update_player`
+- Gravity: +4 per frame to `_player_vy` (`PLAYER_GRAVITY`), capped at `PLAYER_MAX_FALL` (8 px/frame); rising (negative) velocity is never clamped
+- Integration is signed 16-bit: `_player_y` (low = fraction, +1 = pixel) adds `_player_vy` with carry/borrow
+- Descending clamp: pins to `map_height*8-8` so an open-pit fall can never push the 8-bit VIC sprite Y back through the top of the screen (16-bit position alone can't wrap at 256; VIC still can)
+- Ascending clamp: borrow below zero pins to row 0 and kills `_player_vy`
+- Jump: `PLAYER_JUMP_VY = $F0` (-16), only when `_on_ground` is set; clears `_on_ground` so there is no double jump
+- Floor collision (`check_collisions`): tile at `(y+7)>>3`; **skipped while`_player_vy` is negative** so a jump can actually leave the ground; snaps to tile top, zeroes `_player_vy`, sets `_on_ground = 1`
+- `_on_ground` is *not* cleared at the top of `update_player` — it is set by the floor check and cleared by the jump, giving 1-frame coyote time after walking off a ledge
 
 ### Collision Detection
 - Player bullets vs enemies: AABB check, decrement `enemy_hp`, kill when HP <= 0
@@ -274,7 +278,7 @@ assumes an increasing pointer table — grep the module headers instead:
 
 ## Known Issues & Missing Features
 - **Title music is probably inaudible**: `Alien: intro`'s only note byte anywhere in its channel streams is `$59` (AY index 9 = A-1), and `ay_to_sid_note()` computes `note - 12` with a floor of 0, so it lands on `note_table` index 0 = frequency 0. The title therefore renders as one inaudible note plus rests on all three channels. Level music is unaffected (AY 44-56 -> SID 32-44)
-- **`MAIN` has only ~193 bytes of headroom**: after the pattern-length fix, `BSS` ends at `$9F3F` and `MAIN` runs to `$A000`. `RODATA` is ~31 KB of which ~18 KB is music. Any further data growth needs a size check first — run `ld65 -C anp2.cfg -m map.txt build/*.o` and read the segment table (the link will fail rather than corrupt if it overflows, but the fix would be data, not code)
+- **`MAIN` has only ~41 bytes of headroom**: after the player-physics fix, `BSS` ends at `$9FD6` and `MAIN` runs to `$A000`. `RODATA` is ~31 KB of which ~18 KB is music. Any further data growth needs a size check first — run `ld65 -C anp2.cfg -m map.txt build/*.o` and read the segment table (the link will fail rather than corrupt if it overflows, but the fix would be data, not code)
 - **Ornaments are parsed but never applied**: `ev->ornament` reaches the output comment only; PT3 ornaments shift the note pitch per row and `print_sid_event()` ignores them
 - **`bossfight` module extracted but not wired**: `bank_3.bin` `$2600` is extracted to `banks/modules/bossfight.pt3` by `make -C source_music banks`, but nothing calls `start_music` for it — no boss state exists. Also note the bank is 16383 bytes while the third slot ends at 16384, so the last byte is truncated by `dd`
 - **Vertical scrolling unverified at runtime**: implemented in `src/anp2.s` (16-bit tile indexing, vertical camera offset, row blits/redraws, one shifted row per rendered frame, `_scroll_x_prev` fix, Level 1 start row 12). Compiles and links cleanly but has not been confirmed in an emulator — see VICE note below
